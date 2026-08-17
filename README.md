@@ -76,7 +76,8 @@ El zoom no cambia el tamaño del lienzo, sólo la ventana `uView` que se muestre
 el lienzo siempre encaja el recorte en el escenario. Eso mantiene la exportación
 al margen del zoom y evita reasignar búferes al ampliar. `RV.ZOOM_STEPS` define
 los saltos; rueda del ratón para acercar sobre el puntero, arrastrar para
-desplazar, `0` para ajustar y `1` para el 100 %.
+desplazar, `0` para ajustar y `1` para el 100 %. El porcentaje de la barra
+alterna entre ajustar y 100 % al pulsarlo.
 
 En modo recorte se dibuja el fotograma entero y el rectángulo se superpone en
 HTML, para que se vea lo que se está dejando fuera. El velo son cuatro sombras
@@ -143,6 +144,14 @@ claridad, ruido— trabaja ya sobre la imagen deformada, que es el orden
 correcto. El viñeteado es la excepción deliberada: usa la posición real del
 fotograma para no curvarse con la deformación.
 
+## Escribir los valores
+
+El número de cada slider es un campo de texto, no una etiqueta: arrastrar va
+bien para buscar, pero para clavar «exposición −0,33» hace falta escribirlo.
+`Enter` confirma, `Esc` descarta, y se acepta la coma decimal. El estilo sólo
+delata que es editable al acercarse, para que el panel se siga leyendo como una
+lista de valores y no como un formulario. El ángulo del recorte funciona igual.
+
 ## Rendimiento
 
 - Una textura por imagen, cacheada en `renderer.textures` y reutilizada al
@@ -165,11 +174,28 @@ fotograma para no curvarse con la deformación.
 La balda izquierda (interruptor «Presets» en la barra, `Esc` para cerrarla)
 lista seis presets incluidos definidos en `RV.PRESETS`, dentro de
 `adjustments.js`. Cada uno es un objeto parcial: lo que no menciona vuelve a su
-valor por defecto al aplicarse, igual que en Lightroom. Añadir uno propio es
-una entrada más en ese array.
+valor por defecto al aplicarse, igual que en Lightroom.
 
-Debajo de la lista está la importación de `.xmp`, que también acepta soltar
-archivos sobre la ventana.
+**Intensidad y quitar.** Al aplicar un preset se guarda el estado previo en
+`presetSel.before`. Con eso, el slider de intensidad mezcla entre ese estado y
+el preset completo (al 100 % es exactamente el preset; al 0 %, lo que había), y
+volver a pulsar el preset activo lo retira devolviendo el estado anterior. Tocar
+cualquier slider a mano suelta el preset: a partir de ahí ya no es él.
+
+Los `.xmp` importados entran por el mismo camino, así que también se gradúan y
+se quitan.
+
+**Guardar y exportar.** «Guardar ajustes como preset» recoge todo lo que difiere
+del valor por defecto y lo añade a la lista «Míos», con botones para exportarlo
+como `.xmp` (↓) o borrarlo (×). La escritura la hace `RV.toXMP()` en `xmp.js`,
+el camino inverso al parser; hay una prueba de ida y vuelta que comprueba que
+todo lo escrito se vuelve a leer idéntico. La excepción es **Tono**, que no
+tiene equivalente en Camera Raw —allí el tono se ajusta por franjas de color, no
+en bloque—, así que se queda fuera y se avisa al exportar.
+
+La persistencia usa la API de almacenamiento de artefactos si existe, el
+navegador si no, y sólo la sesión en último caso. Guardar nunca debe romper la
+aplicación, así que todo va envuelto.
 
 En estrecho (<940 px) la balda se superpone en lugar de empujar el escenario.
 

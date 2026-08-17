@@ -96,10 +96,24 @@
     panels.insertBefore(section, warpGroup);
   });
 
-  /* ---------- Presets incluidos ---------- */
+  /* ---------- Presets ---------- */
+
+  // Estado del preset en curso. `before` es lo que había antes de
+  // aplicarlo: sin eso no se puede ni graduar la intensidad ni quitarlo.
+  var presetSel = null;   // { id, name, kind, target, before, amount }
+
+  var strengthInput = $('#preset-strength');
+  var strengthOut   = $('#preset-strength-val');
+  var amountBox     = $('#preset-amount');
 
   RV.PRESETS.forEach(function (preset) {
+    presetList.appendChild(buildPresetRow(preset, 'incluido'));
+  });
+
+  function buildPresetRow(preset, kind) {
     var li = document.createElement('li');
+    li.className = 'preset-row';
+
     var b = document.createElement('button');
     b.className = 'preset';
     b.type = 'button';
@@ -107,30 +121,236 @@
     b.dataset.preset = preset.id;
     b.innerHTML = '<b></b><small></small>';
     b.querySelector('b').textContent = preset.name;
-    b.querySelector('small').textContent = preset.hint;
-    b.addEventListener('click', function () { applyBuiltin(preset); });
+    b.querySelector('small').textContent = preset.hint || '';
+    b.addEventListener('click', function () { togglePreset(preset, kind); });
     li.appendChild(b);
-    presetList.appendChild(li);
-  });
 
-  function applyBuiltin(preset) {
+    if (kind === 'mio') {
+      var actions = document.createElement('div');
+      actions.className = 'preset-actions';
+
+      var save = document.createElement('button');
+      save.type = 'button';
+      save.className = 'preset-action';
+      save.textContent = '↓';
+      save.title = 'Exportar como .xmp';
+      save.setAttribute('aria-label', 'Exportar ' + preset.name + ' como .xmp');
+      save.addEventListener('click', function (e) { e.stopPropagation(); exportPreset(preset); });
+
+      var del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'preset-action preset-action--danger';
+      del.textContent = '×';
+      del.title = 'Borrar preset';
+      del.setAttribute('aria-label', 'Borrar ' + preset.name);
+      del.addEventListener('click', function (e) { e.stopPropagation(); deleteUserPreset(preset.id); });
+
+      actions.appendChild(save);
+      actions.appendChild(del);
+      li.appendChild(actions);
+    }
+    return li;
+  }
+
+  /** Pulsar el preset activo lo quita; pulsar otro lo sustituye. */
+  function togglePreset(preset, kind) {
     var img = active();
     if (!img) { toast('Carga una imagen antes de aplicar un preset.', true); return; }
-    img.settings = RV.applyPreset(preset.values);
+
+    if (presetSel && presetSel.id === preset.id) { clearPreset(); return; }
+
+    presetSel = {
+      id: preset.id,
+      name: preset.name,
+      kind: kind,
+      target: RV.applyPreset(preset.values),
+      before: Object.assign({}, img.settings),
+      amount: 100
+    };
+    strengthInput.value = 100;
+    amountBox.hidden = false;
+    applyPresetAmount();
+    setActivePreset(preset.id);
+  }
+
+  /**
+   * Mezcla entre lo que había antes y el preset completo. Al 100 % el
+   * resultado es exactamente el preset; al 0 %, el estado anterior.
+   */
+  function applyPresetAmount() {
+    var img = active();
+    if (!img || !presetSel) return;
+    var k = presetSel.amount / 100;
+
+    RV.ALL.forEach(function (adj) {
+      var a = presetSel.before[adj.id], b = presetSel.target[adj.id];
+      var v = a + (b - a) * k;
+      img.settings[adj.id] = adj.decimals ? v : Math.round(v);
+    });
+
     syncAll(img.settings);
     markEdited(img);
     requestRender();
-    setActivePreset(preset.id);
+
+    strengthOut.textContent = Math.round(presetSel.amount) + ' %';
     presetNote.hidden = false;
-    presetNote.innerHTML = '<b>' + escapeHtml(preset.name) + '</b> · preset incluido';
+    presetNote.innerHTML = '<b>' + escapeHtml(presetSel.name) + '</b> · ' +
+      (presetSel.kind === 'mio' ? 'preset guardado' :
+       presetSel.kind === 'xmp' ? 'preset importado' : 'preset incluido') +
+      ' al ' + Math.round(presetSel.amount) + ' %';
+  }
+
+  function clearPreset() {
+    var img = active();
+    if (img && presetSel) {
+      img.settings = Object.assign({}, presetSel.before);
+      syncAll(img.settings);
+      markEdited(img);
+      requestRender();
+    }
+    presetSel = null;
+    amountBox.hidden = true;
+    presetNote.hidden = true;
+    setActivePreset(null);
   }
 
   function setActivePreset(id) {
     activePreset = id;
-    Array.prototype.forEach.call(presetList.querySelectorAll('.preset'), function (b) {
+    if (!id) { presetSel = null; amountBox.hidden = true; }
+    var rows = document.querySelectorAll('.preset[data-preset]');
+    Array.prototype.forEach.call(rows, function (b) {
       b.setAttribute('aria-pressed', String(b.dataset.preset === id));
     });
   }
+
+  strengthInput.addEventListener('input', function () {
+    if (!presetSel) return;
+    presetSel.amount = parseFloat(strengthInput.value);
+    applyPresetAmount();
+  });
+
+  /* ---- Presets propios ---- */
+
+  // Almacenamiento: la API de artefactos si está, si no el navegador, y
+  // si tampoco, sólo la sesión. Guardar nunca debe romper la aplicación.
+  var store = {
+    read: function () {
+      if (window.storage && window.storage.get) {
+        return window.storage.get('revelado:presets')
+          .then(function (r) { return r ? JSON.parse(r.value) : []; })
+          .catch(function () { return []; });
+      }
+      try {
+        return Promise.resolve(JSON.parse(window.localStorage.getItem('revelado:presets') || '[]'));
+      } catch (e) { return Promise.resolve([]); }
+    },
+    write: function (list) {
+      var json = JSON.stringify(list);
+      if (window.storage && window.storage.set) {
+        return window.storage.set('revelado:presets', json).catch(function () {});
+      }
+      try { window.localStorage.setItem('revelado:presets', json); } catch (e) {}
+      return Promise.resolve();
+    }
+  };
+
+  var userPresets = [];
+  var userList = $('#user-preset-list');
+  var mineTitle = $('#mine-title');
+
+  function renderUserPresets() {
+    userList.innerHTML = '';
+    mineTitle.hidden = userPresets.length === 0;
+    userPresets.forEach(function (p) {
+      userList.appendChild(buildPresetRow(p, 'mio'));
+    });
+    if (presetSel) setActivePreset(presetSel.id);
+  }
+
+  store.read().then(function (list) {
+    if (!Array.isArray(list)) return;
+    userPresets = list.filter(function (p) { return p && p.id && p.values; });
+    renderUserPresets();
+  });
+
+  function deleteUserPreset(id) {
+    var found = userPresets.filter(function (p) { return p.id === id; })[0];
+    userPresets = userPresets.filter(function (p) { return p.id !== id; });
+    if (presetSel && presetSel.id === id) clearPreset();
+    renderUserPresets();
+    store.write(userPresets);
+    if (found) toast('Preset «' + found.name + '» borrado.');
+  }
+
+  function exportPreset(preset) {
+    var out = RV.toXMP(preset.name, RV.applyPreset(preset.values));
+    var blob = new Blob([out.text], { type: 'application/rdf+xml' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = safeName(preset.name) + '.xmp';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 60000);
+    toast(out.skipped.length
+      ? 'Exportado sin ' + out.skipped.join(', ') + ': Camera Raw no tiene ese ajuste.'
+      : 'Preset exportado como ' + safeName(preset.name) + '.xmp');
+  }
+
+  /* ---- Guardar los ajustes actuales ---- */
+
+  var presetModal = $('#preset-modal');
+  var presetNameInput = $('#preset-name');
+
+  $('#btn-preset-save').addEventListener('click', function () {
+    var img = active();
+    if (!img) { toast('Carga una imagen para guardar sus ajustes.', true); return; }
+    if (RV.isDefault(img.settings)) {
+      toast('No hay ningún ajuste que guardar todavía.', true);
+      return;
+    }
+    var touched = RV.ALL.filter(function (a) { return img.settings[a.id] !== a.def; });
+    presetNameInput.value = 'Mi preset ' + (userPresets.length + 1);
+    $('#preset-modal-meta').textContent = touched.length + ' ajustes · ' +
+      touched.slice(0, 4).map(function (a) { return a.label.toLowerCase(); }).join(', ') +
+      (touched.length > 4 ? '…' : '');
+    presetModal.hidden = false;
+    presetNameInput.focus();
+    presetNameInput.select();
+  });
+
+  function closePresetModal() { presetModal.hidden = true; }
+
+  function saveUserPreset() {
+    var img = active();
+    if (!img) return;
+    var name = String(presetNameInput.value).trim().slice(0, 60) || 'Sin nombre';
+
+    var values = {};
+    RV.ALL.forEach(function (a) {
+      if (img.settings[a.id] !== a.def) values[a.id] = img.settings[a.id];
+    });
+
+    userPresets.push({
+      id: 'mio-' + Date.now().toString(36),
+      name: name,
+      hint: Object.keys(values).length + ' ajustes',
+      values: values
+    });
+
+    closePresetModal();
+    renderUserPresets();
+    store.write(userPresets);
+    toast('Preset «' + name + '» guardado.');
+  }
+
+  $('#preset-cancel').addEventListener('click', closePresetModal);
+  $('#preset-confirm').addEventListener('click', saveUserPreset);
+  presetModal.addEventListener('click', function (e) { if (e.target === presetModal) closePresetModal(); });
+  presetNameInput.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') saveUserPreset();
+  });
 
   /* ---------- Encuadre: zoom, recorte y giros ---------- */
 
@@ -166,18 +386,36 @@
     var row = document.createElement('div');
     row.className = 'ctl';
     row.innerHTML = '<div class="ctl__top"><label class="ctl__label" for="geo-angle">Ángulo</label>' +
-                    '<span class="ctl__val">0.0°</span></div>' +
+                    '<input type="text" class="ctl__val" id="geo-angle-val" ' +
+                    'inputmode="decimal" autocomplete="off" aria-label="Ángulo (valor)" value="0.0°"></div>' +
                     '<div class="ctl__track"><input type="range" id="geo-angle" ' +
                     'min="-45" max="45" step="0.1" value="0"></div>';
-    angleInput = row.querySelector('input');
+    angleInput = row.querySelector('#geo-angle');
     var out = row.querySelector('.ctl__val');
+
+    function commitAngle() {
+      var img = active();
+      if (!img) { out.value = '0.0°'; return; }
+      var n = parseFloat(String(out.value).replace(',', '.').replace(/[^0-9.+-]/g, ''));
+      if (!isFinite(n)) { syncGeo(); return; }
+      img.geo.angle = RV.clamp(n, -45, 45);
+      RV.normalizeCrop(img.geo, img.bitmap.width, img.bitmap.height);
+      syncGeo();
+      resize();
+    }
+    out.addEventListener('focus', function () { out.select(); });
+    out.addEventListener('blur', commitAngle);
+    out.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { commitAngle(); out.blur(); }
+      if (e.key === 'Escape') { syncGeo(); out.blur(); }
+    });
 
     angleInput.addEventListener('input', function () {
       var img = active();
       if (!img) { angleInput.value = 0; return; }
       img.geo.angle = parseFloat(angleInput.value);
       RV.normalizeCrop(img.geo, img.bitmap.width, img.bitmap.height);
-      out.textContent = img.geo.angle.toFixed(1) + '°';
+      out.value = img.geo.angle.toFixed(1) + '°';
       row.classList.toggle('is-dirty', img.geo.angle !== 0);
       markEdited(img);
       resize();
@@ -259,7 +497,7 @@
     var img = active();
     var g = img ? img.geo : RV.defaultGeometry();
     angleInput.value = g.angle;
-    angleInput.out.textContent = g.angle.toFixed(1) + '°';
+    angleInput.out.value = g.angle.toFixed(1) + '°';
     angleInput.row.classList.toggle('is-dirty', g.angle !== 0);
     $('#flip-h').setAttribute('aria-pressed', String(!!g.flipH));
     $('#flip-v').setAttribute('aria-pressed', String(!!g.flipV));
@@ -395,7 +633,6 @@
 
   $('#zoom-in').addEventListener('click', function () { stepZoom(1); });
   $('#zoom-out').addEventListener('click', function () { stepZoom(-1); });
-  $('#zoom-fit').addEventListener('click', function () { setZoom('fit'); });
   $('#zoom-pct').addEventListener('click', function () {
     var img = active();
     if (!img) return;
@@ -691,9 +928,40 @@
     label.htmlFor = 'ctl-' + adj.id;
     label.textContent = adj.label;
 
-    var val = document.createElement('span');
+    // El valor es un campo de texto: arrastrar el slider va bien para
+    // buscar, pero para clavar un número hace falta escribirlo.
+    var val = document.createElement('input');
+    val.type = 'text';
     val.className = 'ctl__val';
-    val.textContent = RV.format(adj, adj.def);
+    val.inputMode = 'decimal';
+    val.autocomplete = 'off';
+    val.spellcheck = false;
+    val.value = RV.format(adj, adj.def);
+    val.setAttribute('aria-label', adj.label + ' (valor)');
+
+    val.addEventListener('focus', function () { val.select(); });
+    val.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { commitTyped(); val.blur(); }
+      if (e.key === 'Escape') {
+        var img = active();
+        syncControl(adj, img ? img.settings[adj.id] : adj.def);
+        val.blur();
+      }
+    });
+    val.addEventListener('blur', commitTyped);
+
+    function commitTyped() {
+      var img = active();
+      if (!img) { val.value = RV.format(adj, adj.def); return; }
+      // Se acepta la coma decimal y se ignora todo lo que no sea número.
+      var n = parseFloat(String(val.value).replace(',', '.').replace(/[^0-9.+-]/g, ''));
+      if (!isFinite(n)) { syncControl(adj, img.settings[adj.id]); return; }
+      img.settings[adj.id] = RV.clamp(n, adj.min, adj.max);
+      syncControl(adj, img.settings[adj.id]);
+      markEdited(img);
+      setActivePreset(null);
+      requestRender();
+    }
 
     top.appendChild(label);
     top.appendChild(val);
@@ -736,7 +1004,7 @@
   function syncControl(adj, value) {
     var c = controls[adj.id];
     c.input.value = value;
-    c.valueEl.textContent = RV.format(adj, value);
+    c.valueEl.value = RV.format(adj, value);
     c.row.classList.toggle('is-dirty', value !== adj.def);
   }
 
@@ -872,6 +1140,8 @@
     syncGeo();
     BRUSH_SLIDERS.forEach(function (d) { if (d.refresh) d.refresh(); });
     presetNote.hidden = true;
+    presetSel = null;
+    amountBox.hidden = true;
     setActivePreset(null);
     renderStrip();
     resize();
@@ -1046,19 +1316,18 @@
         toast(err.message, true);
         return;
       }
-      var img = active();
-      img.settings = RV.applyPreset(result.values);
-      syncAll(img.settings);
-      markEdited(img);
-      setActivePreset(null);
-      requestRender();
+      // Se trata como cualquier otro preset: se puede graduar y quitar.
+      togglePreset({
+        id: 'xmp-' + Date.now().toString(36),
+        name: result.name,
+        hint: result.applied.length + ' ajustes',
+        values: result.values
+      }, 'xmp');
 
-      presetNote.hidden = false;
-      presetNote.innerHTML = '<b>' + escapeHtml(result.name) + '</b> · ' +
-        result.applied.length + ' ajustes aplicados' +
-        (result.warnings.length
-          ? '.<br>Sin aplicar: ' + escapeHtml(result.warnings.join(', ')) + '.'
-          : '.');
+      if (result.warnings.length) {
+        presetNote.innerHTML += '<br>Sin aplicar: ' +
+          escapeHtml(result.warnings.join(', ')) + '.';
+      }
       toast('Preset aplicado: ' + result.name);
     };
     reader.onerror = function () { toast('No se ha podido leer el archivo.', true); };
@@ -1102,12 +1371,29 @@
     var lossless = formatSel.value === 'image/png';
     qualityRow.style.display = lossless ? 'none' : '';
     qualityOut.textContent = qualityIn.value;
+    syncQualitySeg();
     if (img) {
       var out = RV.outputSize(img.geo, img.bitmap.width, img.bitmap.height);
       exportMeta.textContent = out.w + ' × ' + out.h + ' px · ' +
         (nameInput.value.trim() || 'sin-nombre') + '.' + EXT[formatSel.value];
       if (cropping) exportMeta.textContent += ' · recorte en curso';
     }
+  }
+
+  var qualitySeg = $('#quality-seg');
+
+  Array.prototype.forEach.call(qualitySeg.children, function (b) {
+    b.addEventListener('click', function () {
+      qualityIn.value = b.dataset.quality;
+      syncExportFields();
+    });
+  });
+
+  function syncQualitySeg() {
+    var v = parseInt(qualityIn.value, 10);
+    Array.prototype.forEach.call(qualitySeg.children, function (b) {
+      b.setAttribute('aria-pressed', String(parseInt(b.dataset.quality, 10) === v));
+    });
   }
 
   formatSel.addEventListener('change', syncExportFields);
@@ -1122,6 +1408,8 @@
 
   // Los nombres de archivo no admiten separadores de ruta ni caracteres
   // reservados en Windows; se limpian en vez de rechazar el nombre.
+  // Declarada como función para poder usarla desde el panel de presets,
+  // que se monta antes que este bloque.
   function safeName(raw) {
     var name = String(raw).trim().replace(/[\/\\:*?"<>|]+/g, '-').replace(/^\.+/, '');
     return name.slice(0, 120) || 'revelado';
@@ -1199,6 +1487,8 @@
     syncGeo();
     BRUSH_SLIDERS.forEach(function (d) { if (d.refresh) d.refresh(); });
     presetNote.hidden = true;
+    presetSel = null;
+    amountBox.hidden = true;
     setActivePreset(null);
     resize();
   });
@@ -1279,7 +1569,7 @@
   window.addEventListener('keydown', function (e) {
     if (e.target.tagName === 'INPUT' && e.target.type !== 'range') return;
     if (e.key === '\\') setCompare(true);
-    if (e.key === 'Escape') { toggleShelf(false); setTool(null); setCropping(false); closeExport(); }
+    if (e.key === 'Escape') { toggleShelf(false); setTool(null); setCropping(false); closeExport(); closePresetModal(); }
     if (e.key === '0' && !e.ctrlKey && !e.metaKey) setZoom('fit');
     if (e.key === '1' && !e.ctrlKey && !e.metaKey) setZoom(100);
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); warpUndo(); }
