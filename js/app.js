@@ -159,12 +159,16 @@
 
     if (presetSel && presetSel.id === preset.id) { clearPreset(); return; }
 
+    // Cambiar de preset descarta el anterior: la nueva mezcla parte del
+    // estado previo a cualquier preset, no del resultado del que había.
+    var base = presetSel ? presetSel.before : img.settings;
+
     presetSel = {
       id: preset.id,
       name: preset.name,
       kind: kind,
       target: RV.applyPreset(preset.values),
-      before: Object.assign({}, img.settings),
+      before: Object.assign({}, base),
       amount: 100
     };
     strengthInput.value = 100;
@@ -1249,8 +1253,10 @@
     if (cropping) { geo.quarter = img.geo.quarter; geo.angle = img.geo.angle; }
 
     var out = RV.outputSize(geo, W, H);
-    var pad = 60;
-    var box = renderer.fit(stage.clientWidth - pad, stage.clientHeight - pad, out.w, out.h);
+    // El margen vertical es mayor: abajo viven las barras de vista y de
+    // zoom, y la imagen se centra, así que hay que reservar a ambos lados.
+    var padX = 60, padY = 84;
+    var box = renderer.fit(stage.clientWidth - padX, stage.clientHeight - padY, out.w, out.h);
 
     viewRect = cropping
       ? { cx: 0.5, cy: 0.5, w: 1, h: 1, pct: 100, fitPct: 100 }
