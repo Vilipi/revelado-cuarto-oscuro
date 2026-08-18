@@ -23,12 +23,21 @@
   var geoGroup   = $('#group-geo');
   var cropLayer  = $('#crop-overlay');
   var cropBox    = $('#crop-box');
+  var cropbar    = $('#cropbar');
   var zoombar    = $('#zoombar');
   var viewbar    = $('#viewbar');
   var splitLayer = $('#split-overlay');
   var splitDiv   = $('#split-divider');
   var brushRing  = $('#brush-ring');
   var presetList = $('#preset-list');
+
+  var scopeSeg     = $('#scope-seg');
+  var scopeLocal   = $('#scope-local');
+  var maskPaintBtn = $('#mask-paint');
+  var maskEraseBtn = $('#mask-erase');
+  var maskShowBox  = $('#mask-show');
+  var maskHint     = $('#mask-hint');
+  var maskApplyBtn = $('#mask-apply');
 
   var fileInput  = $('#file-input');
   var xmpInput   = $('#xmp-input');
@@ -41,6 +50,19 @@
   // Pincel de deformación
   var brush = { tool: null, size: 16, strength: 55 };
   var stroke = null;
+
+  // Ajuste local: dónde escriben los sliders y con qué pincel se
+  // selecciona la zona. Los dos pinceles se excluyen entre sí.
+  var scope = 'global';   // 'global' | 'local'
+  var maskBrush = { tool: null, size: 12, strength: 60, feather: 55 };
+  var groupSections = {};
+
+  /** El pincel que manda ahora mismo, o null si no hay ninguno activo. */
+  function activeBrush() {
+    if (maskBrush.tool) return maskBrush;
+    if (brush.tool) return brush;
+    return null;
+  }
 
   // Encuadre
   var cropping = false;
@@ -94,6 +116,7 @@
     section.appendChild(head);
     section.appendChild(body);
     panels.insertBefore(section, warpGroup);
+    groupSections[group.id] = section;
   });
 
   /* ---------- Presets ---------- */
@@ -159,6 +182,10 @@
 
     if (presetSel && presetSel.id === preset.id) { clearPreset(); return; }
 
+    // Un preset se aplica a la foto entera: si el panel estuviera en modo
+    // zona, los sliders mostrarían otra cosa que lo que acaba de pasar.
+    if (scope === 'local') setScope('global');
+
     // Cambiar de preset descarta el anterior: la nueva mezcla parte del
     // estado previo a cualquier preset, no del resultado del que había.
     var base = presetSel ? presetSel.before : img.settings;
@@ -192,7 +219,7 @@
       img.settings[adj.id] = adj.decimals ? v : Math.round(v);
     });
 
-    syncAll(img.settings);
+    syncPanels();
     markEdited(img);
     requestRender();
 
@@ -208,7 +235,7 @@
     var img = active();
     if (img && presetSel) {
       img.settings = Object.assign({}, presetSel.before);
-      syncAll(img.settings);
+      syncPanels();
       markEdited(img);
       requestRender();
     }
@@ -480,19 +507,39 @@
   });
 
   $('#crop-toggle').addEventListener('click', function () { setCropping(!cropping); });
+  $('#crop-done').addEventListener('click', function () { setCropping(false); });
+  $('#crop-cancel').addEventListener('click', function () { setCropping(false, true); });
 
-  function setCropping(on) {
+  // Encuadre tal y como estaba al entrar, para poder descartar los cambios.
+  var cropUndo = null;
+
+  /** `cancel` descarta el encuadre y vuelve al que había al entrar. */
+  function setCropping(on, cancel) {
     var img = active();
     if (on && !img) { toast('Carga una imagen antes de recortar.', true); return; }
+    var was = cropping;
     cropping = on;
-    $('#crop-toggle').setAttribute('aria-pressed', String(on));
+    var toggle = $('#crop-toggle');
+    toggle.setAttribute('aria-pressed', String(on));
+    toggle.textContent = on ? 'Terminar' : 'Recortar';
     cropLayer.hidden = !on;
+    cropbar.hidden = !on;
+
     if (on) {
+      if (!was) cropUndo = img ? Object.assign({}, img.geo) : null;
       setTool(null);
+      setMaskTool(null);
       if (split.on) setSplit(false);
       geoGroup.dataset.open = 'true';
       geoGroup.querySelector('.group__head').setAttribute('aria-expanded', 'true');
       if (img) img.view = RV.defaultView();
+    } else {
+      if (cancel && img && cropUndo) {
+        img.geo = cropUndo;
+        img.view = RV.defaultView();
+        syncGeo();
+      }
+      cropUndo = null;
     }
     resize();
   }
@@ -658,7 +705,7 @@
   }, { passive: false });
 
   function canPan() {
-    return !cropping && !brush.tool && viewRect.w < 0.999;
+    return !cropping && !activeBrush() && viewRect.w < 0.999;
   }
 
   function syncZoombar() {
@@ -739,7 +786,7 @@
       format: function () {
         var img = active();
         if (!img) return brush.size.toFixed(1) + ' %';
-        return Math.max(1, Math.round(brushRadiusPx(img) * 2)) + ' px';
+        return Math.max(1, Math.round(brushScreenPx(img))) + ' px';
       }
     },
     {
@@ -748,32 +795,251 @@
     }
   ];
 
-  BRUSH_SLIDERS.forEach(function (def) {
-    var row = document.createElement('div');
-    row.className = 'ctl is-dirty';
-    row.innerHTML = '<div class="ctl__top"><label class="ctl__label"></label>' +
-                    '<span class="ctl__val"></span></div>' +
-                    '<div class="ctl__track"><input type="range"></div>';
-    var input = row.querySelector('input');
-    var out = row.querySelector('.ctl__val');
-    row.querySelector('.ctl__label').textContent = def.label;
-    row.querySelector('.ctl__label').htmlFor = 'brush-' + def.key;
-    row.querySelector('.ctl__track').style.setProperty('--detent', '-10px');
-    input.id = 'brush-' + def.key;
-    input.min = def.min; input.max = def.max; input.step = def.step;
-    input.value = def.toSlider ? def.toSlider(brush[def.key]) : brush[def.key];
-    out.textContent = def.format();
-
-    input.addEventListener('input', function () {
-      var raw = parseFloat(input.value);
-      brush[def.key] = def.fromSlider ? def.fromSlider(raw) : raw;
+  /**
+   * Monta los sliders de un pincel. `state` es el objeto que guarda sus
+   * valores y `prefix` evita que los ids choquen entre los dos pinceles.
+   */
+  function buildBrushSliders(defs, state, container, prefix) {
+    defs.forEach(function (def) {
+      var row = document.createElement('div');
+      row.className = 'ctl is-dirty';
+      row.innerHTML = '<div class="ctl__top"><label class="ctl__label"></label>' +
+                      '<span class="ctl__val"></span></div>' +
+                      '<div class="ctl__track"><input type="range"></div>';
+      var input = row.querySelector('input');
+      var out = row.querySelector('.ctl__val');
+      row.querySelector('.ctl__label').textContent = def.label;
+      row.querySelector('.ctl__label').htmlFor = prefix + def.key;
+      row.querySelector('.ctl__track').style.setProperty('--detent', '-10px');
+      input.id = prefix + def.key;
+      input.min = def.min; input.max = def.max; input.step = def.step;
+      input.value = def.toSlider ? def.toSlider(state[def.key]) : state[def.key];
       out.textContent = def.format();
-      if (lastPointer) moveRing(lastPointer.x, lastPointer.y);
+
+      input.addEventListener('input', function () {
+        var raw = parseFloat(input.value);
+        state[def.key] = def.fromSlider ? def.fromSlider(raw) : raw;
+        out.textContent = def.format();
+        if (lastPointer) moveRing(lastPointer.x, lastPointer.y);
+      });
+
+      def.refresh = function () { out.textContent = def.format(); };
+      container.appendChild(row);
+    });
+  }
+
+  buildBrushSliders(BRUSH_SLIDERS, brush, $('#warp-sliders'), 'brush-');
+
+  var MASK_SLIDERS = [
+    {
+      key: 'size', label: 'Tamaño', min: 1, max: 100, step: 1,
+      toSlider: sliderFromSize,
+      fromSlider: sizeFromSlider,
+      format: function () {
+        var img = active();
+        if (!img) return maskBrush.size.toFixed(1) + ' %';
+        return Math.max(1, Math.round(brushScreenPx(img, maskBrush))) + ' px';
+      }
+    },
+    {
+      key: 'strength', label: 'Flujo', min: 5, max: 100, step: 1,
+      format: function () { return Math.round(maskBrush.strength) + ''; }
+    },
+    {
+      key: 'feather', label: 'Difuminado', min: 0, max: 100, step: 1,
+      format: function () { return Math.round(maskBrush.feather) + ''; }
+    }
+  ];
+
+  buildBrushSliders(MASK_SLIDERS, maskBrush, $('#mask-sliders'), 'maskbrush-');
+
+  /* ---------- Ajuste local ---------- */
+
+  /**
+   * Los ajustes de la zona, o null si no hay nada que mezclar. Devolver
+   * null cuando la selección está vacía o los valores están en reposo
+   * no es sólo cosmético: le ahorra al shader evaluar el revelado dos
+   * veces por píxel.
+   */
+  function localFor(img) {
+    if (!img.local.field || img.local.field.isEmpty()) return null;
+    if (RV.isLocalDefault(img.local.settings)) return null;
+    return img.local.settings;
+  }
+
+  function setScope(next) {
+    scope = next === 'local' ? 'local' : 'global';
+    app.classList.toggle('is-local', scope === 'local');
+    scopeLocal.hidden = scope !== 'local';
+
+    Array.prototype.forEach.call(scopeSeg.children, function (b) {
+      b.setAttribute('aria-pressed', String(b.dataset.scope === scope));
     });
 
-    def.refresh = function () { out.textContent = def.format(); };
-    $('#warp-sliders').appendChild(row);
+    // Los grupos que no admiten uso local se apagan mientras se edita la
+    // zona: así se ve de un vistazo que ese slider no va a la selección.
+    Object.keys(groupSections).forEach(function (id) {
+      var off = scope === 'local' && RV.LOCAL_GROUPS.indexOf(id) === -1;
+      markGroupOff(groupSections[id], off, 'global');
+    });
+
+    // Deformar comparte el gesto con el pincel de selección: los dos no
+    // pueden estar en la mano a la vez, así que se aparta del todo.
+    markGroupOff(warpGroup, scope === 'local', 'no disponible');
+    if (scope === 'local') {
+      warpGroup.dataset.open = 'false';
+      warpGroup.querySelector('.group__head').setAttribute('aria-expanded', 'false');
+    }
+
+    if (scope === 'local') {
+      var img = active();
+      setTool(null);
+      // Entrar sin selección y sin pincel no lleva a ninguna parte.
+      if (img && (!img.local.field || img.local.field.isEmpty())) setMaskTool('paint');
+      if (img) renderer.setMask(img.local.field || null);
+      // Por defecto se ve la zona: es la ayuda visual que explica dónde
+      // va a caer el retoque, y sin ella el modo pincel es más difícil
+      // de seguir a ciegas.
+      maskShowBox.checked = true;
+      renderer.setShowMask(true);
+    } else {
+      setMaskTool(null);
+      maskShowBox.checked = false;
+      renderer.setShowMask(false);
+    }
+
+    refreshMaskHint();
+    syncPanels();
+    requestRender();
+  }
+
+  /** Apaga un grupo y explica en la cabecera por qué no está disponible. */
+  function markGroupOff(section, off, note) {
+    section.classList.toggle('is-off', off);
+    section.querySelector('.group__head').dataset.note = off ? note : '';
+    // Atenuar y quitar los eventos de puntero no basta: sin `disabled` el
+    // control sigue alcanzándose con el tabulador y respondiendo al teclado.
+    var controls = section.querySelectorAll('.group__body button, .group__body input');
+    Array.prototype.forEach.call(controls, function (el) { el.disabled = off; });
+  }
+
+  function refreshMaskHint() {
+    refreshMaskApply();
+    var img = active();
+    if (!img) { maskHint.textContent = 'Carga una imagen para seleccionar una zona.'; return; }
+    var field = img.local.field;
+    if (!field || field.isEmpty()) {
+      maskHint.textContent = 'Pinta sobre la foto para elegir la zona. Después, los ' +
+                             'ajustes de luz, color y detalle sólo actuarán ahí.';
+      return;
+    }
+    var pct = Math.round(field.coverage() * 100);
+    maskHint.textContent = (pct < 1
+      ? 'Seleccionado menos del 1 % de la foto.'
+      : 'Seleccionado el ' + pct + ' % de la foto.') +
+      ' Lo que ajustes aquí se suma a lo de toda la foto.';
+  }
+
+  Array.prototype.forEach.call(scopeSeg.children, function (b) {
+    b.addEventListener('click', function () { setScope(b.dataset.scope); });
   });
+
+  (function () {
+    var head = $('#mask-head');
+    head.addEventListener('click', function () {
+      var open = scopeLocal.dataset.open !== 'false';
+      scopeLocal.dataset.open = String(!open);
+      head.setAttribute('aria-expanded', String(!open));
+    });
+  })();
+
+  maskPaintBtn.addEventListener('click', function () {
+    setMaskTool(maskBrush.tool === 'paint' ? null : 'paint');
+  });
+  maskEraseBtn.addEventListener('click', function () {
+    setMaskTool(maskBrush.tool === 'erase' ? null : 'erase');
+  });
+
+  maskShowBox.addEventListener('change', function () {
+    renderer.setShowMask(maskShowBox.checked);
+    requestRender();
+  });
+
+  $('#mask-all').addEventListener('click', function () {
+    var img = active();
+    if (!img) return;
+    var mask = maskFor(img);
+    mask.snapshot();
+    mask.fill();
+    afterMaskEdit(img);
+  });
+
+  $('#mask-invert').addEventListener('click', function () {
+    var img = active();
+    if (!img || !img.local.field) { toast('Todavía no hay ninguna zona seleccionada.', true); return; }
+    img.local.field.snapshot();
+    img.local.field.invert();
+    afterMaskEdit(img);
+  });
+
+  $('#mask-clear').addEventListener('click', function () {
+    var img = active();
+    if (!img || !img.local.field) return;
+    img.local.field.snapshot();
+    img.local.field.clear();
+    afterMaskEdit(img);
+  });
+
+  /**
+   * El botón sólo tiene sentido cuando hay zona pintada y algún ajuste
+   * que fijar. Es barato de recalcular, así que se llama en cada edición.
+   */
+  function refreshMaskApply() {
+    var img = active();
+    maskApplyBtn.disabled = !img || !localFor(img);
+  }
+
+  maskApplyBtn.addEventListener('click', function () {
+    var img = active();
+    var local = img && localFor(img);
+    if (!local) return;
+
+    if (!renderer.bakeLocal(img.id, local)) {
+      toast('No se ha podido fijar el ajuste de la zona.', true);
+      return;
+    }
+
+    // El retoque ya vive en los píxeles: los sliders locales y la
+    // máscara vuelven a cero para la siguiente zona.
+    img.baked = true;
+    img.local.settings = RV.localDefaults();
+    img.local.field.snapshot();
+    img.local.field.clear();
+    renderer.setMask(img.local.field);
+    setMaskTool('paint');
+
+    syncPanels();
+    refreshMaskHint();
+    markEdited(img);
+    requestRender();
+    toast('Zona aplicada. Ya puedes pintar otra.');
+  });
+
+  function afterMaskEdit(img) {
+    renderer.setMask(img.local.field);
+    markEdited(img);
+    refreshMaskHint();
+    requestRender();
+  }
+
+  function maskUndo() {
+    var img = active();
+    if (!img || !img.local.field || !img.local.field.undo()) {
+      toast('No queda ningún trazo de selección que deshacer.');
+      return;
+    }
+    afterMaskEdit(img);
+  }
 
   (function () {
     var head = warpGroup.querySelector('.group__head');
@@ -795,11 +1061,27 @@
     Object.keys(TOOLS).forEach(function (k) {
       TOOLS[k].setAttribute('aria-pressed', String(k === name));
     });
-    app.classList.toggle('is-brushing', !!name);
+    // Deformar y seleccionar usan el mismo gesto sobre la foto: sólo
+    // puede haber un pincel en la mano.
+    if (name) setMaskTool(null);
+    app.classList.toggle('is-brushing', !!activeBrush());
     if (name) {
       warpGroup.dataset.open = 'true';
       warpGroup.querySelector('.group__head').setAttribute('aria-expanded', 'true');
     }
+  }
+
+  function setMaskTool(name) {
+    maskBrush.tool = name;
+    maskPaintBtn.setAttribute('aria-pressed', String(name === 'paint'));
+    maskEraseBtn.setAttribute('aria-pressed', String(name === 'erase'));
+    if (name) {
+      brush.tool = null;
+      Object.keys(TOOLS).forEach(function (k) {
+        TOOLS[k].setAttribute('aria-pressed', 'false');
+      });
+    }
+    app.classList.toggle('is-brushing', !!activeBrush());
   }
 
   /** Crea el campo de deformación de la imagen activa la primera vez. */
@@ -811,9 +1093,29 @@
     return img.warp;
   }
 
-  /** Radio del pincel en píxeles de la imagen. */
-  function brushRadiusPx(img) {
-    return (brush.size / 100) * Math.min(img.bitmap.width, img.bitmap.height);
+  /**
+   * Radio del pincel en píxeles de la imagen. El tamaño del pincel es
+   * fijo en pantalla: al acercar el zoom se ve menos imagen, así que el
+   * radio en píxeles de imagen se reduce en la misma proporción y el aro
+   * nunca cambia de tamaño.
+   */
+  function brushRadiusPx(img, b) {
+    b = b || activeBrush() || brush;
+    var out = RV.outputSize(img.geo, img.bitmap.width, img.bitmap.height);
+    return (b.size / 100) * Math.min(out.w, out.h) * viewRect.w;
+  }
+
+  /** Píxeles de pantalla por píxel de imagen, contando recorte y zoom. */
+  function viewScale(img) {
+    var r = viewport.getBoundingClientRect();
+    var out = RV.outputSize(img.geo, img.bitmap.width, img.bitmap.height);
+    if (!r.width || !out.w || !viewRect.w) return 1;
+    return r.width / (out.w * viewRect.w);
+  }
+
+  /** Diámetro del aro en píxeles de pantalla. Constante frente al zoom. */
+  function brushScreenPx(img, b) {
+    return brushRadiusPx(img, b) * 2 * viewScale(img);
   }
 
   /**
@@ -842,12 +1144,8 @@
     lastPointer = { x: clientX, y: clientY };
     var img = active();
     if (!img) return;
-    var r = viewport.getBoundingClientRect();
     var stageRect = stage.getBoundingClientRect();
-    // Píxeles de pantalla por píxel de imagen, contando recorte y zoom.
-    var out = RV.outputSize(img.geo, img.bitmap.width, img.bitmap.height);
-    var scale = r.width / (out.w * viewRect.w);
-    var d = brushRadiusPx(img) * 2 * scale;
+    var d = brushScreenPx(img);
     brushRing.style.width = d + 'px';
     brushRing.style.height = d + 'px';
     brushRing.style.transform =
@@ -855,15 +1153,61 @@
                      (clientY - stageRect.top - d / 2) + 'px)';
   }
 
+  /** Crea la máscara del ajuste local la primera vez que hace falta. */
+  function maskFor(img) {
+    if (!img.local.field) {
+      img.local.field = new RV.MaskField(renderer.gl, img.bitmap.width, img.bitmap.height);
+    }
+    renderer.setMask(img.local.field);
+    return img.local.field;
+  }
+
+  /**
+   * Sella el pincel a lo largo del segmento recorrido. Sin recorrerlo,
+   * un arrastre rápido dejaría el trazo a lunares: entre dos eventos de
+   * puntero puede haber mucha foto.
+   */
+  function applyMask(img, mask, x0, y0, x1, y1) {
+    var r = brushRadiusPx(img, maskBrush);
+    var f = maskBrush.strength / 100;
+    var feather = maskBrush.feather / 100;
+    var dx = (x1 - x0) * img.bitmap.width;
+    var dy = (y1 - y0) * img.bitmap.height;
+    var dist = Math.sqrt(dx * dx + dy * dy);
+    var steps = Math.max(1, Math.ceil(dist / Math.max(r / 3, 1)));
+
+    for (var i = 1; i <= steps; i++) {
+      var t = i / steps;
+      var x = x0 + (x1 - x0) * t;
+      var y = y0 + (y1 - y0) * t;
+      if (maskBrush.tool === 'erase') mask.erase(x, y, r, f, feather);
+      else mask.paint(x, y, r, f, feather);
+    }
+
+    markEdited(img);
+    refreshMaskHint();
+    requestRender();
+  }
+
   function beginStroke(e) {
     var img = active();
-    if (!img || !brush.tool) return false;
+    if (!img) return false;
     var p = pointerUV(e);
     if (!p.inside) return false;
 
+    if (maskBrush.tool) {
+      var mask = maskFor(img);
+      mask.snapshot();
+      stroke = { x: p.x, y: p.y, mask: true };
+      viewport.setPointerCapture(e.pointerId);
+      applyMask(img, mask, p.x, p.y, p.x, p.y);
+      return true;
+    }
+
+    if (!brush.tool) return false;
     var field = warpFor(img);
     field.snapshot();
-    stroke = { x: p.x, y: p.y };
+    stroke = { x: p.x, y: p.y, mask: false };
     viewport.setPointerCapture(e.pointerId);
     applyBrush(img, field, p.x, p.y, 0, 0);
     return true;
@@ -873,9 +1217,12 @@
     var img = active();
     if (!stroke || !img) return;
     var p = pointerUV(e);
-    var dx = p.x - stroke.x;
-    var dy = p.y - stroke.y;
-    applyBrush(img, img.warp, p.x, p.y, dx, dy);
+
+    if (stroke.mask) {
+      applyMask(img, maskFor(img), stroke.x, stroke.y, p.x, p.y);
+    } else {
+      applyBrush(img, img.warp, p.x, p.y, p.x - stroke.x, p.y - stroke.y);
+    }
     stroke.x = p.x;
     stroke.y = p.y;
   }
@@ -898,7 +1245,7 @@
   function endStroke() {
     var img = active();
     stroke = null;
-    if (img && img.warp) requestRender();
+    if (img && (img.warp || img.local.field)) requestRender();
   }
 
   function warpUndo() {
@@ -948,7 +1295,7 @@
       if (e.key === 'Enter') { commitTyped(); val.blur(); }
       if (e.key === 'Escape') {
         var img = active();
-        syncControl(adj, img ? img.settings[adj.id] : adj.def);
+        syncControl(adj, img ? targetFor(img, adj)[adj.id] : adj.def);
         val.blur();
       }
     });
@@ -959,11 +1306,12 @@
       if (!img) { val.value = RV.format(adj, adj.def); return; }
       // Se acepta la coma decimal y se ignora todo lo que no sea número.
       var n = parseFloat(String(val.value).replace(',', '.').replace(/[^0-9.+-]/g, ''));
-      if (!isFinite(n)) { syncControl(adj, img.settings[adj.id]); return; }
-      img.settings[adj.id] = RV.clamp(n, adj.min, adj.max);
-      syncControl(adj, img.settings[adj.id]);
+      var t = targetFor(img, adj);
+      if (!isFinite(n)) { syncControl(adj, t[adj.id]); return; }
+      t[adj.id] = RV.clamp(n, adj.min, adj.max);
+      syncControl(adj, t[adj.id]);
       markEdited(img);
-      setActivePreset(null);
+      if (t === img.settings) setActivePreset(null);
       requestRender();
     }
 
@@ -987,10 +1335,12 @@
     input.addEventListener('input', function () {
       var img = active();
       if (!img) { input.value = adj.def; return; }
-      img.settings[adj.id] = parseFloat(input.value);
-      syncControl(adj, img.settings[adj.id]);
+      var t = targetFor(img, adj);
+      t[adj.id] = parseFloat(input.value);
+      syncControl(adj, t[adj.id]);
       markEdited(img);
-      setActivePreset(null);
+      // Un retoque local no invalida el preset: el preset es global.
+      if (t === img.settings) setActivePreset(null);
       requestRender();
     });
 
@@ -1012,14 +1362,33 @@
     c.row.classList.toggle('is-dirty', value !== adj.def);
   }
 
-  function syncAll(settings) {
-    RV.ALL.forEach(function (adj) { syncControl(adj, settings[adj.id]); });
+  /**
+   * Dónde escribe este slider. Sólo luz, color y detalle admiten
+   * versión local; los efectos van siempre al ajuste global aunque el
+   * panel esté en modo zona (por eso su grupo se apaga).
+   */
+  function targetFor(img, adj) {
+    return (scope === 'local' && RV.isLocal(adj.id)) ? img.local.settings : img.settings;
+  }
+
+  function syncAll(settings, localSettings) {
+    RV.ALL.forEach(function (adj) {
+      var src = (scope === 'local' && localSettings && RV.isLocal(adj.id))
+        ? localSettings : settings;
+      syncControl(adj, src[adj.id]);
+    });
+  }
+
+  /** Vuelca en los sliders lo que corresponde a la imagen y al ámbito. */
+  function syncPanels() {
+    var img = active();
+    syncAll(img ? img.settings : RV.defaults(), img ? img.local.settings : null);
   }
 
   function resetOne(adj) {
     var img = active();
     if (!img) return;
-    img.settings[adj.id] = adj.def;
+    targetFor(img, adj)[adj.id] = adj.def;
     syncControl(adj, adj.def);
     markEdited(img);
     requestRender();
@@ -1051,6 +1420,11 @@
           bitmap: bitmap,
           thumbUrl: URL.createObjectURL(file),
           settings: RV.defaults(),
+          // `field` se crea la primera vez que se pinta: una máscara por
+          // imagen cargada sería memoria tirada en el caso normal.
+          local: { field: null, settings: RV.localDefaults() },
+          // Zonas ya aceptadas: van dentro de los píxeles, no en un ajuste.
+          baked: false,
           geo: RV.defaultGeometry(),
           view: RV.defaultView()
         };
@@ -1090,6 +1464,7 @@
 
     var item = library[index];
     if (item.warp) item.warp.dispose();
+    if (item.local.field) item.local.field.dispose();
     renderer.release(id);
     URL.revokeObjectURL(item.thumbUrl);
     if (item.bitmap && item.bitmap.close) item.bitmap.close();
@@ -1110,6 +1485,7 @@
     activeId = null;
     renderer.select(null);
     renderer.setWarp(null);
+    renderer.setMask(null);
     renderer.setFrame(null);
     renderer.setSplit(-1);
     split.on = false;
@@ -1124,7 +1500,8 @@
     filename.textContent = '';
     presetNote.hidden = true;
     setActivePreset(null);
-    syncAll(RV.defaults());
+    syncPanels();
+    refreshMaskHint();
     drawHistogram(null);
     renderStrip();
   }
@@ -1136,13 +1513,16 @@
 
     renderer.select(id);
     renderer.setWarp(img.warp && !img.warp.isEmpty() ? img.warp : null);
+    renderer.setMask(img.local.field || null);
     viewport.hidden = false;
     dropzone.hidden = true;
     filename.textContent = img.name + '  ·  ' + img.bitmap.width + '×' + img.bitmap.height;
 
-    syncAll(img.settings);
+    syncPanels();
     syncGeo();
     BRUSH_SLIDERS.forEach(function (d) { if (d.refresh) d.refresh(); });
+    MASK_SLIDERS.forEach(function (d) { if (d.refresh) d.refresh(); });
+    refreshMaskHint();
     presetNote.hidden = true;
     presetSel = null;
     amountBox.hidden = true;
@@ -1207,13 +1587,15 @@
   function isPristine(img) {
     return RV.isDefault(img.settings) &&
            RV.isDefaultGeometry(img.geo) &&
-           (!img.warp || img.warp.isEmpty());
+           (!img.warp || img.warp.isEmpty()) &&
+           !localFor(img) && !img.baked;
   }
 
   function markEdited(img) {
     var index = library.indexOf(img);
     var node = strip.children[index];
     if (node) node.classList.toggle('is-edited', !isPristine(img));
+    refreshMaskApply();
   }
 
   /* ---------- Render ---------- */
@@ -1225,7 +1607,7 @@
       frameQueued = false;
       var img = active();
       if (!img) return;
-      renderer.draw(img.settings, comparing);
+      renderer.draw(img.settings, comparing, localFor(img));
       scheduleHistogram();
     });
   }
@@ -1235,10 +1617,10 @@
     histTimer = setTimeout(function () {
       var img = active();
       if (!img) return;
-      drawHistogram(renderer.histogram(img.settings));
+      drawHistogram(renderer.histogram(img.settings, localFor(img)));
       // El histograma se pinta en un framebuffer aparte, así que
       // hay que devolver el resultado visible al lienzo.
-      renderer.draw(img.settings, comparing);
+      renderer.draw(img.settings, comparing, localFor(img));
     }, 70);
   }
 
@@ -1255,7 +1637,9 @@
     var out = RV.outputSize(geo, W, H);
     // El margen vertical es mayor: abajo viven las barras de vista y de
     // zoom, y la imagen se centra, así que hay que reservar a ambos lados.
-    var padX = 60, padY = 84;
+    // Al recortar hace falta más hueco abajo: los tiradores sobresalen 8 px
+    // del fotograma y la barra de Hecho / Cancelar ocupa esa franja.
+    var padX = 60, padY = cropping ? 120 : 84;
     var box = renderer.fit(stage.clientWidth - padX, stage.clientHeight - padY, out.w, out.h);
 
     viewRect = cropping
@@ -1436,7 +1820,7 @@
     btn.disabled = true;
     btn.textContent = 'Exportando…';
 
-    renderer.exportBlob(img.settings, quality, mime).then(function (blob) {
+    renderer.exportBlob(img.settings, quality, mime, localFor(img)).then(function (blob) {
       var url = URL.createObjectURL(blob);
       var kb = Math.round(blob.size / 1024);
 
@@ -1486,12 +1870,20 @@
     var img = active();
     if (!img) return;
     img.settings = RV.defaults();
+    img.local.settings = RV.localDefaults();
     img.geo = RV.defaultGeometry();
     img.view = RV.defaultView();
     if (img.warp) { img.warp.snapshot(); img.warp.clear(); renderer.setWarp(null); }
-    syncAll(img.settings);
+    if (img.local.field) { img.local.field.snapshot(); img.local.field.clear(); }
+    // Las zonas aceptadas están dentro de la textura: hay que volver a
+    // subir el original para deshacerlas.
+    if (img.baked) { renderer.restoreSource(img.id, img.bitmap); img.baked = false; }
+    setScope('global');
+    syncPanels();
     syncGeo();
     BRUSH_SLIDERS.forEach(function (d) { if (d.refresh) d.refresh(); });
+    MASK_SLIDERS.forEach(function (d) { if (d.refresh) d.refresh(); });
+    refreshMaskHint();
     presetNote.hidden = true;
     presetSel = null;
     amountBox.hidden = true;
@@ -1532,7 +1924,7 @@
     requestRender();
   }
   viewport.addEventListener('pointerdown', function (e) {
-    if (brush.tool) { if (beginStroke(e)) e.preventDefault(); return; }
+    if (activeBrush()) { if (beginStroke(e)) e.preventDefault(); return; }
     if (canPan()) {
       var img = active();
       panDrag = { x: e.clientX, y: e.clientY, cx: viewRect.cx, cy: viewRect.cy };
@@ -1555,7 +1947,7 @@
       e.preventDefault();
       return;
     }
-    if (!brush.tool) return;
+    if (!activeBrush()) return;
     moveRing(e.clientX, e.clientY);
     if (stroke) { continueStroke(e); e.preventDefault(); }
   });
@@ -1567,7 +1959,7 @@
   window.addEventListener('pointercancel', endStroke);
 
   stage.addEventListener('pointermove', function (e) {
-    if (brush.tool && !stroke) moveRing(e.clientX, e.clientY);
+    if (activeBrush() && !stroke) moveRing(e.clientX, e.clientY);
   });
 
   $('#btn-warp-undo').addEventListener('click', warpUndo);
@@ -1575,10 +1967,19 @@
   window.addEventListener('keydown', function (e) {
     if (e.target.tagName === 'INPUT' && e.target.type !== 'range') return;
     if (e.key === '\\') setCompare(true);
-    if (e.key === 'Escape') { toggleShelf(false); setTool(null); setCropping(false); closeExport(); closePresetModal(); }
+    if (e.key === 'Escape') {
+      // Dentro del recorte, Escape sólo lo cancela: cerrar de paso el
+      // panel o la herramienta sería un efecto sorpresa.
+      if (cropping) { setCropping(false, true); return; }
+      toggleShelf(false); setTool(null); setMaskTool(null); closeExport(); closePresetModal();
+    }
+    if (e.key === 'Enter' && cropping) { setCropping(false); return; }
     if (e.key === '0' && !e.ctrlKey && !e.metaKey) setZoom('fit');
     if (e.key === '1' && !e.ctrlKey && !e.metaKey) setZoom(100);
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); warpUndo(); }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+      e.preventDefault();
+      if (maskBrush.tool || scope === 'local') maskUndo(); else warpUndo();
+    }
   });
   window.addEventListener('keyup', function (e) {
     if (e.key === '\\') setCompare(false);

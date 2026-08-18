@@ -49,7 +49,7 @@
       </div>
 
       <div class="shelf__foot">
-        <button class="btn" id="btn-preset-save" type="button">Guardar ajustes como preset</button>
+        <button class="btn" id="btn-preset-save" type="button">Guardar preset</button>
         <button class="btn" id="btn-preset" type="button">Importar .xmp</button>
         <p class="shelf__hint">También puedes soltar archivos <kbd>.xmp</kbd> sobre la ventana.</p>
       </div>
@@ -79,6 +79,12 @@
       </div>
     </div>
 
+    <div class="cropbar" id="cropbar" hidden>
+      <span class="cropbar__hint">Arrastra los tiradores para encuadrar</span>
+      <button class="cropbar__btn" id="crop-cancel" type="button">Cancelar</button>
+      <button class="cropbar__btn cropbar__btn--key" id="crop-done" type="button">Hecho</button>
+    </div>
+
     <div class="split-overlay" id="split-overlay" hidden>
       <div class="split-divider" id="split-divider">
         <span class="split-grip" aria-hidden="true"></span>
@@ -106,7 +112,46 @@
       <div class="legend"><span>Negros</span><span>Blancos</span></div>
     </div>
 
+    <div class="scope" id="scope">
+      <div class="seg seg--two" id="scope-seg" role="group" aria-label="Dónde se aplican los ajustes">
+        <button type="button" data-scope="global" aria-pressed="true">Toda la foto</button>
+        <button type="button" data-scope="local"  aria-pressed="false">Pincel</button>
+      </div>
+    </div>
+
     <div class="panels" id="panels">
+      <div class="scope__local" id="scope-local" hidden data-open="true">
+        <button class="scope__head" id="mask-head" type="button" aria-expanded="true" aria-controls="scope-body">
+          Pincel de selección <span class="chev" aria-hidden="true">▾</span>
+        </button>
+
+        <div class="scope__body" id="scope-body">
+          <div class="tools tools--two">
+            <button class="tool" id="mask-paint" type="button" aria-pressed="false">Pintar</button>
+            <button class="tool" id="mask-erase" type="button" aria-pressed="false">Borrar</button>
+          </div>
+
+          <div id="mask-sliders"></div>
+
+          <label class="check">
+            <input type="checkbox" id="mask-show">
+            <span>Ver la zona seleccionada</span>
+          </label>
+
+          <div class="tools tools--three">
+            <button class="tool" id="mask-all" type="button" title="Seleccionar la foto entera">Todo</button>
+            <button class="tool" id="mask-invert" type="button" title="Invertir la selección">Invertir</button>
+            <button class="tool" id="mask-clear" type="button" title="Vaciar la selección">Vaciar</button>
+          </div>
+
+          <p class="tool-hint" id="mask-hint"></p>
+
+          <button class="btn btn--key mask-apply" id="mask-apply" type="button" disabled>
+            Aceptar y pintar otra zona
+          </button>
+        </div>
+      </div>
+
       <section class="group" data-open="false" id="group-geo">
         <button class="group__head" type="button" aria-expanded="false">
           Encuadre <span class="chev" aria-hidden="true">▾</span>
@@ -223,6 +268,7 @@
 <script src="js/shaders.js"></script>
 <script src="js/geometry.js"></script>
 <script src="js/liquify.js"></script>
+<script src="js/mask.js"></script>
 <script src="js/renderer.js"></script>
 <script src="js/xmp.js"></script>
 <script src="js/app.js"></script>

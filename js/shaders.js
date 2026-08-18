@@ -4,6 +4,16 @@
    Orden: deformación → ruido → detalle → neblina → linealizar →
           balance de blancos → luz → sRGB → contraste → color →
           viñeteado y grano.
+
+   Los ajustes de luz, color y detalle viven en un `struct Grade`
+   en vez de en uniforms sueltos. Así el revelado cabe en una
+   función, `develop()`, que se puede evaluar dos veces: una con
+   los ajustes globales y otra con los locales. La máscara del
+   pincel decide cuánto pesa cada una.
+
+   El viñeteado y el grano se quedan fuera de `develop()`: son
+   efectos de fotograma, se calculan una sola vez sobre el
+   resultado ya mezclado.
    ============================================================ */
 
 window.RV = window.RV || {};
@@ -11,10 +21,18 @@ window.RV = window.RV || {};
 RV.VERTEX_SRC = `
 attribute vec2 aPos;
 varying vec2 vUV;
+
+// 1.0 al dibujar dentro de un framebuffer cuyo resultado se va a volver
+// a usar como textura. OpenGL guarda la primera fila abajo, mientras que
+// las imágenes llegan con el origen arriba: sin este volteo, lo horneado
+// saldría del revés la próxima vez que se muestre.
+uniform float uFlipY;
+
 void main() {
   // El quad va de -1 a 1; la textura se voltea en Y porque las
   // imágenes llegan con el origen arriba a la izquierda.
-  vUV = vec2(aPos.x * 0.5 + 0.5, 0.5 - aPos.y * 0.5);
+  float y = 0.5 - aPos.y * 0.5;
+  vUV = vec2(aPos.x * 0.5 + 0.5, mix(y, 1.0 - y, uFlipY));
   gl_Position = vec4(aPos, 0.0, 1.0);
 }`;
 
@@ -25,10 +43,13 @@ varying vec2 vUV;
 
 uniform sampler2D uImage;
 uniform sampler2D uWarp;   // campo de desplazamiento del pincel (RG)
+uniform sampler2D uMask;   // máscara del ajuste local (R)
 uniform vec2  uTexel;      // 1.0 / tamaño de la imagen en píxeles
 uniform float uAspect;     // ancho / alto
 uniform float uWarpOn;
 uniform float uWarpRange;  // desplazamiento máximo codificable, en UV
+uniform float uMaskOn;     // 1.0 = hay ajuste local que aplicar
+uniform float uMaskShow;   // 1.0 = teñir la zona seleccionada
 uniform float uBypass;     // 1.0 = mostrar el original
 uniform float uSplit;      // < 0 desactivado; si no, corte vertical en 0..1
 
@@ -39,23 +60,31 @@ uniform float uAngle;      // enderezado, en radianes
 uniform float uQuarter;    // giros de 90° horarios, 0..3
 uniform vec2  uFlip;       // 0 o 1 por eje
 
-uniform float uExposure;   // pasos de diafragma, -5..5
-uniform float uContrast;   // -100..100
-uniform float uHighlights;
-uniform float uShadows;
-uniform float uWhites;
-uniform float uBlacks;
+// Los ajustes que admiten aplicarse sólo sobre la zona pintada. El
+// orden y los nombres son los de RV.LOCAL en adjustments.js: el
+// renderer construye las localizaciones a partir de ese catálogo.
+struct Grade {
+  float exposure;    // pasos de diafragma, -5..5
+  float contrast;    // -100..100
+  float highlights;
+  float shadows;
+  float whites;
+  float blacks;
 
-uniform float uTemp;       // -100..100 (frío → cálido)
-uniform float uTint;       // -100..100 (verde → magenta)
-uniform float uHue;        // -100..100 → ±60°
-uniform float uVibrance;
-uniform float uSaturation;
+  float temp;        // -100..100 (frío → cálido)
+  float tint;        // -100..100 (verde → magenta)
+  float hue;         // -100..100 → ±60°
+  float vibrance;
+  float saturation;
 
-uniform float uTexture;
-uniform float uClarity;
-uniform float uSharpen;    // 0..150
-uniform float uDenoise;    // 0..100
+  float texture;
+  float clarity;
+  float sharpen;     // 0..150
+  float denoise;     // 0..100
+};
+
+uniform Grade uG;          // ajustes globales
+uniform Grade uL;          // ajustes de la zona seleccionada
 
 uniform float uDehaze;     // -100..100
 uniform float uVignette;   // -100..100 (negativo oscurece esquinas)
@@ -144,6 +173,91 @@ float noise(vec2 p) {
   return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
 }
 
+/**
+ * El revelado completo de un píxel con un juego de ajustes dado.
+ * La neblina entra aquí porque cae en mitad del orden, pero lee el
+ * uniform global: vale lo mismo en las dos evaluaciones.
+ */
+vec3 develop(vec2 uv, Grade p) {
+  vec3 c = texture2D(uImage, uv).rgb;
+  float l0 = luma(c);
+
+  // ---- Reducción de ruido ----
+  // Se toma la crominancia del desenfoque y se devuelve la luminancia
+  // original: limpia el color sin fundir el detalle.
+  if (p.denoise > 0.0) {
+    float a = p.denoise / 100.0;
+    vec3 b = blurRGB(uv, 1.6);
+    c = mix(c, b + vec3(l0 - luma(b)), a);
+    c = mix(c, b, a * 0.30);
+    l0 = luma(c);
+  }
+
+  // ---- Detalle: máscara de enfoque a tres radios ----
+  if (p.sharpen > 0.0) {
+    c += vec3(l0 - blurLuma(uv, 1.0)) * (p.sharpen / 100.0) * 1.6;
+  }
+  if (p.texture != 0.0) {
+    c += vec3(l0 - blurLuma(uv, 2.5)) * (p.texture / 100.0) * 1.1;
+  }
+  if (p.clarity != 0.0) {
+    // La claridad solo actúa en los medios tonos, como en Camera Raw.
+    float mid = 1.0 - pow(abs(l0 * 2.0 - 1.0), 1.6);
+    c += vec3(l0 - blurLuma(uv, 9.0)) * (p.clarity / 100.0) * 1.3 * mid;
+  }
+  c = clamp(c, 0.0, 1.0);
+
+  // ---- Neblina: contraste local de radio muy amplio + punto de negro ----
+  if (uDehaze != 0.0) {
+    float a = uDehaze / 100.0;
+    c += vec3(luma(c) - blurLuma(uv, 22.0)) * a * 0.85;
+    c = clamp(c, 0.0, 1.0);
+    c = clamp((c - 0.035 * a) / max(1.0 - 0.035 * a, 0.25), 0.0, 1.0);
+  }
+
+  // ---- A luz lineal para exposición y balance de blancos ----
+  vec3 lin = toLinear(c);
+
+  float t = p.temp / 100.0;
+  float g = p.tint / 100.0;
+  lin.r *= 1.0 + 0.32 * t + 0.10 * g;
+  lin.g *= 1.0 - 0.14 * g;
+  lin.b *= 1.0 - 0.32 * t + 0.10 * g;
+
+  lin *= exp2(p.exposure);
+
+  // Sombras y negros suman luz (multiplicar no levanta un negro puro);
+  // luces y blancos multiplican, que es como se comportan al recortar.
+  float l = luma(lin);
+  lin += (p.shadows / 100.0) * (1.0 - smoothstep(0.0, 0.45, l)) * 0.10;
+  lin += (p.blacks  / 100.0) * (1.0 - smoothstep(0.0, 0.16, l)) * 0.05;
+  lin *= 1.0 + (p.highlights / 100.0) * smoothstep(0.25, 1.00, l) * 0.80;
+  lin *= 1.0 + (p.whites     / 100.0) * smoothstep(0.45, 1.60, l) * 0.70;
+
+  c = clamp(toSRGB(max(lin, 0.0)), 0.0, 1.0);
+
+  // ---- Contraste: curva en S sobre valores de pantalla ----
+  float k = p.contrast / 100.0;
+  if (k > 0.0) {
+    c = mix(c, c * c * (3.0 - 2.0 * c), k * 0.9);
+  } else {
+    c = mix(c, (c - 0.5) * 0.5 + 0.5, -k);
+  }
+
+  // ---- Color ----
+  if (p.hue != 0.0) {
+    c = clamp(hueShift(c, (p.hue / 100.0) * 1.0472), 0.0, 1.0);
+  }
+
+  float lc  = luma(c);
+  float sat = max(max(c.r, c.g), c.b) - min(min(c.r, c.g), c.b);
+  // La intensidad protege lo que ya está saturado (y de paso los tonos de piel).
+  c = mix(vec3(lc), c, 1.0 + (p.vibrance / 100.0) * (1.0 - sat));
+  c = mix(vec3(lc), c, 1.0 + p.saturation / 100.0 + max(uDehaze, 0.0) / 100.0 * 0.20);
+
+  return c;
+}
+
 void main() {
   // ---- Encuadre: zoom, recorte, enderezado y giros ----
   vec2 base = sourceUV(vUV);
@@ -165,81 +279,18 @@ void main() {
     return;
   }
 
-  vec3 c = texture2D(uImage, uv).rgb;
-  float l0 = luma(c);
+  // ---- Revelado ----
+  // La máscara se lee en "base", sin deformar: es donde el usuario la
+  // pintó y donde espera verla.
+  float m = 0.0;
+  if (uMaskOn > 0.5 || uMaskShow > 0.5) m = texture2D(uMask, base).r;
 
-  // ---- Reducción de ruido ----
-  // Se toma la crominancia del desenfoque y se devuelve la luminancia
-  // original: limpia el color sin fundir el detalle.
-  if (uDenoise > 0.0) {
-    float a = uDenoise / 100.0;
-    vec3 b = blurRGB(uv, 1.6);
-    c = mix(c, b + vec3(l0 - luma(b)), a);
-    c = mix(c, b, a * 0.30);
-    l0 = luma(c);
+  vec3 c = develop(uv, uG);
+  // Fuera de la selección no hay nada que mezclar: evaluar el revelado
+  // local otra vez costaría 36 muestras de textura para nada.
+  if (uMaskOn > 0.5 && m > 0.002) {
+    c = mix(c, develop(uv, uL), m);
   }
-
-  // ---- Detalle: máscara de enfoque a tres radios ----
-  if (uSharpen > 0.0) {
-    c += vec3(l0 - blurLuma(uv, 1.0)) * (uSharpen / 100.0) * 1.6;
-  }
-  if (uTexture != 0.0) {
-    c += vec3(l0 - blurLuma(uv, 2.5)) * (uTexture / 100.0) * 1.1;
-  }
-  if (uClarity != 0.0) {
-    // La claridad solo actúa en los medios tonos, como en Camera Raw.
-    float mid = 1.0 - pow(abs(l0 * 2.0 - 1.0), 1.6);
-    c += vec3(l0 - blurLuma(uv, 9.0)) * (uClarity / 100.0) * 1.3 * mid;
-  }
-  c = clamp(c, 0.0, 1.0);
-
-  // ---- Neblina: contraste local de radio muy amplio + punto de negro ----
-  if (uDehaze != 0.0) {
-    float a = uDehaze / 100.0;
-    c += vec3(luma(c) - blurLuma(uv, 22.0)) * a * 0.85;
-    c = clamp(c, 0.0, 1.0);
-    c = clamp((c - 0.035 * a) / max(1.0 - 0.035 * a, 0.25), 0.0, 1.0);
-  }
-
-  // ---- A luz lineal para exposición y balance de blancos ----
-  vec3 lin = toLinear(c);
-
-  float t = uTemp / 100.0;
-  float g = uTint / 100.0;
-  lin.r *= 1.0 + 0.32 * t + 0.10 * g;
-  lin.g *= 1.0 - 0.14 * g;
-  lin.b *= 1.0 - 0.32 * t + 0.10 * g;
-
-  lin *= exp2(uExposure);
-
-  // Sombras y negros suman luz (multiplicar no levanta un negro puro);
-  // luces y blancos multiplican, que es como se comportan al recortar.
-  float l = luma(lin);
-  lin += (uShadows / 100.0) * (1.0 - smoothstep(0.0, 0.45, l)) * 0.10;
-  lin += (uBlacks  / 100.0) * (1.0 - smoothstep(0.0, 0.16, l)) * 0.05;
-  lin *= 1.0 + (uHighlights / 100.0) * smoothstep(0.25, 1.00, l) * 0.80;
-  lin *= 1.0 + (uWhites     / 100.0) * smoothstep(0.45, 1.60, l) * 0.70;
-
-  c = clamp(toSRGB(max(lin, 0.0)), 0.0, 1.0);
-
-  // ---- Contraste: curva en S sobre valores de pantalla ----
-  float k = uContrast / 100.0;
-  if (k > 0.0) {
-    c = mix(c, c * c * (3.0 - 2.0 * c), k * 0.9);
-  } else {
-    c = mix(c, (c - 0.5) * 0.5 + 0.5, -k);
-  }
-
-  // ---- Color ----
-  if (uHue != 0.0) {
-    c = clamp(hueShift(c, (uHue / 100.0) * 1.0472), 0.0, 1.0);
-  }
-
-  float lc  = luma(c);
-  float sat = max(max(c.r, c.g), c.b) - min(min(c.r, c.g), c.b);
-  // La intensidad protege lo que ya está saturado (y de paso los tonos de piel).
-  c = mix(vec3(lc), c, 1.0 + (uVibrance / 100.0) * (1.0 - sat));
-  c = mix(vec3(lc), c, 1.0 + uSaturation / 100.0 + max(uDehaze, 0.0) / 100.0 * 0.20);
 
   // ---- Viñeteado: sobre la posición real del fotograma, no la deformada ----
   if (uVignette != 0.0) {
@@ -256,6 +307,10 @@ void main() {
     c += n * (uGrain / 100.0) * 0.16 * mid;
   }
 
+  // ---- Vista de la máscara: sólo en pantalla, nunca al exportar ----
+  if (uMaskShow > 0.5) {
+    c = mix(c, vec3(0.88, 0.26, 0.18), m * 0.55);
+  }
+
   gl_FragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
 }`;
-

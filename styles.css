@@ -555,10 +555,12 @@ input.ctl__val:focus {
 
 /* ---------- Aviso ---------- */
 
+/* Va a la altura de la tira inferior, no sobre el escenario: así no
+   tapa la foto ni choca con las barras de vista, zoom y recorte. */
 .toast {
   position: fixed;
   left: 50%;
-  bottom: calc(var(--strip) + 22px);
+  bottom: 20px;
   transform: translate(-50%, 8px);
   padding: 9px 16px;
   font-size: 12px;
@@ -900,6 +902,151 @@ input.ctl__val:focus {
 }
 .viewbar__btn:hover { color: var(--ink); background: var(--panel-2); }
 .viewbar__btn[aria-pressed="true"] { color: var(--safelight); background: #2a2118; }
+
+/* ---------- Ámbito: toda la foto o zona con pincel ---------- */
+
+/* El selector se queda fijo fuera del scroll: es un cambio de modo, hay
+   que poder volver a "toda la foto" sin buscarlo. */
+.scope {
+  flex: none;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--rule);
+}
+
+.seg--two { grid-template-columns: repeat(2, 1fr); }
+.tools--three { grid-template-columns: repeat(3, 1fr); }
+
+/* Las herramientas del pincel sí viajan con el scroll, junto a los
+   ajustes: si ocuparan sitio fijo no cabría nada más en el panel.
+   Se distinguen por el color, no por otro rótulo. */
+.scope__local {
+  margin: 10px 12px 4px;
+  padding: 9px 10px 10px;
+  border: 1px solid var(--safelight-dim);
+  border-radius: 3px;
+  background: #221c15;
+}
+.scope__local[hidden] { display: none; }
+
+/* Cabecera propia: el cuadro se pliega como los grupos de ajustes, que
+   es lo que el panel ya enseña a hacer. */
+.scope__head {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 2px 0 8px;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+  color: var(--safelight);
+}
+.scope__head:hover { color: var(--ink); }
+.scope__head .chev {
+  margin-left: auto;
+  color: var(--safelight-dim);
+  transition: transform var(--dur);
+}
+.scope__local[data-open="false"] .chev { transform: rotate(-90deg); }
+.scope__local[data-open="false"] .scope__body { display: none; }
+.scope__local[data-open="false"] .scope__head { padding-bottom: 2px; }
+
+/* Los sliders del pincel van más apretados que los de revelado: son
+   herramienta, no el ajuste que se está mirando. */
+.scope__local .ctl { padding: 2px 0 5px; }
+.scope__local .tools { margin: 0 0 7px; }
+.scope__local .tools--three { margin: 0; }
+.scope__local .tool-hint { margin: 8px 0 0; }
+
+/* Fija el retoque de la zona en la foto: es el final del recorrido del
+   cuadro, así que va suelto y a lo ancho. */
+.mask-apply {
+  width: 100%;
+  justify-content: center;
+  margin-top: 9px;
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 0 8px;
+  font-size: 11px;
+  color: var(--ink-dim);
+  cursor: pointer;
+}
+.check input { accent-color: var(--safelight); margin: 0; }
+.check:hover { color: var(--ink); }
+
+/* Con el ajuste local activo los grupos que no lo admiten se apagan:
+   un viñeteado dentro de una máscara no significa nada. */
+.group.is-off .group__body { opacity: .4; pointer-events: none; }
+.group.is-off .group__head::after {
+  content: attr(data-note);
+  margin-left: 8px;
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+/* Mientras se edita la zona seleccionada, los sliders que sí actúan
+   sobre ella se marcan para no confundir un valor local con uno global. */
+.app.is-local .group:not(.is-off) .ctl.is-dirty .ctl__val { color: var(--safelight); }
+
+/* ---------- Barra de recorte ---------- */
+
+/* Mientras se recorta, la salida del modo tiene que estar a la vista:
+   el botón del panel derecho queda lejos y no se encuentra. */
+.cropbar {
+  position: absolute;
+  left: 50%;
+  bottom: 6px;
+  transform: translateX(-50%);
+  z-index: 12;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 5px 5px 12px;
+  background: rgba(24, 22, 21, .96);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  box-shadow: 0 14px 34px -16px #000;
+}
+.cropbar[hidden] { display: none; }
+
+.cropbar__hint {
+  margin-right: 4px;
+  font-size: 11px;
+  color: var(--ink-dim);
+  white-space: nowrap;
+}
+
+.cropbar__btn {
+  height: 24px;
+  padding: 0 12px;
+  font-size: 11px;
+  color: var(--ink-dim);
+  background: var(--panel-2);
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+  transition: color var(--dur), background var(--dur), border-color var(--dur);
+}
+.cropbar__btn:hover { color: var(--ink); }
+.cropbar__btn--key {
+  color: var(--safelight);
+  border-color: var(--safelight-dim);
+  background: #2a2118;
+}
+.cropbar__btn--key:hover { color: var(--ink); background: #3a2d1f; }
+
+/* En estrecho la pista sobra: los botones se explican solos. */
+@media (max-width: 620px) {
+  .cropbar__hint { display: none; }
+  .cropbar { padding-left: 5px; }
+}
 
 /* ---------- Comparación con divisoria ---------- */
 

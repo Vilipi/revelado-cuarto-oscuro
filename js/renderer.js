@@ -37,14 +37,40 @@ RV.Renderer = function (canvas) {
   // Cache de localizaciones de uniforms.
   this.u = {};
   var self = this;
-  ['uImage', 'uWarp', 'uTexel', 'uAspect', 'uBypass', 'uWarpOn', 'uWarpRange',
-   'uView', 'uCrop', 'uOriented', 'uAngle', 'uQuarter', 'uFlip', 'uSplit']
-    .concat(RV.ALL.map(function (a) { return a.uniform; }))
-    .forEach(function (name) {
-      self.u[name] = gl.getUniformLocation(self.program, name);
-    });
+  var fixed = ['uImage', 'uWarp', 'uMask', 'uTexel', 'uAspect', 'uBypass',
+               'uWarpOn', 'uWarpRange', 'uMaskOn', 'uMaskShow', 'uFlipY',
+               'uView', 'uCrop', 'uOriented', 'uAngle', 'uQuarter', 'uFlip', 'uSplit']
+    .concat(RV.GLOBAL_ONLY.map(function (a) { return a.uniform; }));
+
+  fixed.forEach(function (name) {
+    self.u[name] = gl.getUniformLocation(self.program, name);
+  });
+
+  // Los ajustes locales viajan en dos structs gemelos. Los nombres de los
+  // campos son los ids del catálogo, así que basta con recorrerlo.
+  this.uG = {};
+  this.uL = {};
+  RV.LOCAL.forEach(function (a) {
+    self.uG[a.id] = gl.getUniformLocation(self.program, 'uG.' + a.id);
+    self.uL[a.id] = gl.getUniformLocation(self.program, 'uL.' + a.id);
+  });
+
+  // Un campo que el compilador haya descartado o renombrado daría un
+  // ajuste que no hace nada y que costaría mucho encontrar. Mejor
+  // reventar aquí, con el nombre delante.
+  var missing = [];
+  fixed.forEach(function (n) { if (!self.u[n]) missing.push(n); });
+  RV.LOCAL.forEach(function (a) {
+    if (!self.uG[a.id]) missing.push('uG.' + a.id);
+    if (!self.uL[a.id]) missing.push('uL.' + a.id);
+  });
+  if (missing.length) {
+    throw new Error('El shader no expone estos uniforms: ' + missing.join(', '));
+  }
+
   gl.uniform1i(this.u.uImage, 0);
   gl.uniform1i(this.u.uWarp, 1);
+  gl.uniform1i(this.u.uMask, 2);
   gl.uniform1f(this.u.uWarpRange, RV.WARP_RANGE);
 
   // Campo neutro para cuando la imagen no está deformada: evita
@@ -55,7 +81,19 @@ RV.Renderer = function (canvas) {
                 new Uint8Array([128, 128, 0, 255]));
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  // Máscara neutra: sin ella habría que muestrear una unidad de textura
+  // sin nada enlazado en cuanto no hubiera ajuste local.
+  this.blankMask = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, this.blankMask);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE,
+                new Uint8Array([0, 0, 0, 255]));
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+
+  this.flipY = false;  // sólo al hornear en un framebuffer reutilizable
   this.warp = null;
+  this.mask = null;    // RV.MaskField del ajuste local, o null
+  this.showMask = false;
   this.frame = null;   // { geo, rect } — lo fija la aplicación antes de dibujar
   this.split = -1;     // posición de la divisoria antes/después, o -1
 
@@ -122,6 +160,70 @@ RV.Renderer.prototype = {
     return entry;
   },
 
+  /**
+   * Fija el ajuste local en los píxeles: dibuja la imagen con el retoque
+   * de la zona ya aplicado y la deja como nuevo origen. A partir de ahí
+   * la máscara puede vaciarse y usarse para otra zona.
+   *
+   * Se hornea sólo lo local, en el espacio de la imagen original: sin
+   * recorte, sin giros, sin zoom y sin deformación. Los ajustes globales
+   * se quedan donde estaban, vivos, y siguen aplicándose encima.
+   */
+  bakeLocal: function (id, local) {
+    var entry = this.textures[id];
+    if (!entry || !this.hasMask() || !local) return false;
+
+    var gl = this.gl;
+    var target = createTarget(gl, entry.w, entry.h);
+
+    var saved = {
+      frame: this.frame, split: this.split, show: this.showMask,
+      warp: this.warp, current: this.current
+    };
+    // El resultado vuelve como textura de origen, así que hay que
+    // escribirlo con la primera fila arriba.
+    this.flipY = true;
+    this.frame = null;
+    this.split = -1;
+    this.showMask = false;
+    // La deformación no se hornea: seguirá aplicándose después, y así el
+    // retoque viaja pegado al contenido en vez de a una posición fija.
+    this.warp = null;
+    this.current = entry;
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo);
+    gl.viewport(0, 0, entry.w, entry.h);
+    this.bindTextures();
+    // Los globales van en reposo: aquí sólo se fija el retoque de la zona.
+    this.applyUniforms(RV.defaults(), false, local);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+    gl.deleteFramebuffer(target.fbo);
+    gl.deleteTexture(entry.tex);
+    entry.tex = target.tex;
+    gl.bindTexture(gl.TEXTURE_2D, entry.tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+
+    this.flipY = false;
+    this.frame = saved.frame;
+    this.split = saved.split;
+    this.showMask = saved.show;
+    this.warp = saved.warp;
+    this.current = saved.current;
+    return true;
+  },
+
+  /** Devuelve la textura original: deshace todos los horneados. */
+  restoreSource: function (id, source) {
+    var entry = this.textures[id];
+    if (!entry) return;
+    this.gl.deleteTexture(entry.tex);
+    delete this.textures[id];
+    var fresh = this.upload(id, source);
+    if (this.current === entry) this.current = fresh;
+  },
+
   release: function (id) {
     var entry = this.textures[id];
     if (!entry) return;
@@ -158,6 +260,16 @@ RV.Renderer.prototype = {
     this.warp = field || null;
   },
 
+  /** Asocia la máscara del ajuste local (o null para quitarla). */
+  setMask: function (field) {
+    this.mask = field || null;
+  },
+
+  /** Tiñe la zona seleccionada. Sólo para la vista previa. */
+  setShowMask: function (on) {
+    this.showMask = !!on;
+  },
+
   /**
    * Fija el encuadre: `geo` es una geometría de geometry.js y `rect` la
    * ventana de zoom devuelta por RV.viewRect. Pasar null vuelve al
@@ -172,13 +284,34 @@ RV.Renderer.prototype = {
     this.frame = geo ? { geo: geo, rect: rect || { cx: 0.5, cy: 0.5, w: 1, h: 1 } } : null;
   },
 
-  applyUniforms: function (settings, bypass) {
+  /** ¿Hay una selección pintada con la que mezclar? */
+  hasMask: function () {
+    return !!(this.mask && !this.mask.isEmpty());
+  },
+
+  /**
+   * `local` son los ajustes de la zona seleccionada, o null si no hay
+   * ajuste local. Los que no admiten uso local (efectos) salen siempre
+   * del juego global.
+   *
+   * Lo local se SUMA a lo global: dentro de la zona se aplica el
+   * revelado general y encima el retoque. Los quince ajustes locales
+   * tienen el reposo en 0, así que el valor local se lee como «cuánto
+   * más que el resto de la foto». Sustituir en vez de sumar obligaría
+   * a repetir en la zona todo lo ya hecho en global.
+   */
+  applyUniforms: function (settings, bypass, local) {
     var gl = this.gl, u = this.u;
     gl.useProgram(this.program);
     gl.uniform1f(u.uBypass, bypass ? 1 : 0);
     gl.uniform2f(u.uTexel, 1 / this.current.w, 1 / this.current.h);
     gl.uniform1f(u.uWarpOn, this.warp ? 1 : 0);
     gl.uniform1f(u.uSplit, this.split);
+
+    var maskOn = this.hasMask() && !!local;
+    gl.uniform1f(u.uMaskOn, maskOn ? 1 : 0);
+    gl.uniform1f(u.uMaskShow, this.showMask && this.hasMask() && !bypass ? 1 : 0);
+    gl.uniform1f(u.uFlipY, this.flipY ? 1 : 0);
 
     var f = this.frame;
     if (f) {
@@ -200,19 +333,30 @@ RV.Renderer.prototype = {
       gl.uniform2f(u.uFlip, 0, 0);
       gl.uniform1f(u.uAspect, this.current.w / this.current.h);
     }
-    for (var i = 0; i < RV.ALL.length; i++) {
-      var a = RV.ALL[i];
+    var i, a;
+    for (i = 0; i < RV.GLOBAL_ONLY.length; i++) {
+      a = RV.GLOBAL_ONLY[i];
       gl.uniform1f(u[a.uniform], settings[a.id]);
+    }
+    for (i = 0; i < RV.LOCAL.length; i++) {
+      a = RV.LOCAL[i];
+      gl.uniform1f(this.uG[a.id], settings[a.id]);
+      // Sin ajuste local los dos juegos son iguales: aunque la mezcla
+      // se colara, el resultado sería el mismo. Con él, la suma se
+      // recorta al rango del slider para no salirse de lo representable.
+      gl.uniform1f(this.uL[a.id], maskOn
+        ? RV.clamp(settings[a.id] + local[a.id], a.min, a.max)
+        : settings[a.id]);
     }
   },
 
-  draw: function (settings, bypass) {
+  draw: function (settings, bypass, local) {
     if (!this.current) return;
     var gl = this.gl;
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     this.bindTextures();
-    this.applyUniforms(settings, bypass);
+    this.applyUniforms(settings, bypass, local);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   },
 
@@ -223,21 +367,30 @@ RV.Renderer.prototype = {
     gl.activeTexture(gl.TEXTURE1);
     if (this.warp) this.warp.upload();
     gl.bindTexture(gl.TEXTURE_2D, this.warp ? this.warp.tex : this.blankWarp);
+    gl.activeTexture(gl.TEXTURE2);
+    if (this.mask) this.mask.upload();
+    gl.bindTexture(gl.TEXTURE_2D, this.mask ? this.mask.tex : this.blankMask);
     gl.activeTexture(gl.TEXTURE0);
   },
 
   /** Devuelve 3 arrays de 64 bins (R, G, B) leídos de un render reducido. */
-  histogram: function (settings) {
+  histogram: function (settings, local) {
     if (!this.current) return null;
     var gl = this.gl, t = this.hist;
+
+    // El teñido de la máscara falsearía el recuento: es una ayuda visual,
+    // no forma parte de la imagen.
+    var shown = this.showMask;
+    this.showMask = false;
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, t.fbo);
     gl.viewport(0, 0, t.w, t.h);
     this.bindTextures();
-    this.applyUniforms(settings, false);
+    this.applyUniforms(settings, false, local);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     gl.readPixels(0, 0, t.w, t.h, gl.RGBA, gl.UNSIGNED_BYTE, this.histPixels);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this.showMask = shown;
 
     var bins = 64;
     var r = new Uint32Array(bins), g = new Uint32Array(bins), b = new Uint32Array(bins);
@@ -255,7 +408,7 @@ RV.Renderer.prototype = {
    * Cambia el tamaño del lienzo temporalmente; quien llame debe
    * volver a ajustar y redibujar la vista previa después.
    */
-  exportBlob: function (settings, quality, mime) {
+  exportBlob: function (settings, quality, mime, local) {
     var self = this;
     return new Promise(function (resolve, reject) {
       if (!self.current) return reject(new Error('No hay imagen activa.'));
@@ -272,14 +425,18 @@ RV.Renderer.prototype = {
       // Se exporta el recorte entero: el zoom es sólo de pantalla.
       var saved = self.frame;
       var savedSplit = self.split;
+      // El teñido de la selección es una ayuda de pantalla: no se exporta.
+      var savedShow = self.showMask;
       self.split = -1;
+      self.showMask = false;
       if (geo) self.setFrame(geo, { cx: 0.5, cy: 0.5, w: 1, h: 1 });
 
       self.canvas.width = w;
       self.canvas.height = h;
-      self.draw(settings, false);
+      self.draw(settings, false, local);
       self.frame = saved;
       self.split = savedSplit;
+      self.showMask = savedShow;
       self.gl.finish();
 
       var type = mime || 'image/jpeg';

@@ -55,6 +55,35 @@ RV.GROUPS = [
 
 RV.ALL = RV.GROUPS.reduce(function (acc, g) { return acc.concat(g.items); }, []);
 
+/* ---- Ajuste local ------------------------------------------------------- */
+
+// Grupos que se pueden aplicar sólo sobre la zona pintada con el pincel.
+// Los efectos quedan fuera a propósito: un viñeteado o un grano dentro
+// de una máscara no significan nada, se definen sobre el fotograma entero.
+RV.LOCAL_GROUPS = ['luz', 'color', 'detalle'];
+
+RV.LOCAL = RV.GROUPS
+  .filter(function (g) { return RV.LOCAL_GROUPS.indexOf(g.id) !== -1; })
+  .reduce(function (acc, g) { return acc.concat(g.items); }, []);
+
+// El resto viaja como uniform suelto: el shader sólo los evalúa una vez.
+RV.GLOBAL_ONLY = RV.ALL.filter(function (a) { return RV.LOCAL.indexOf(a) === -1; });
+
+RV.isLocal = function (id) {
+  return RV.LOCAL.some(function (a) { return a.id === id; });
+};
+
+/** Ajustes locales en su valor de reposo: la máscara nace sin efecto. */
+RV.localDefaults = function () {
+  var s = {};
+  RV.LOCAL.forEach(function (a) { s[a.id] = a.def; });
+  return s;
+};
+
+RV.isLocalDefault = function (settings) {
+  return RV.LOCAL.every(function (a) { return settings[a.id] === a.def; });
+};
+
 RV.BY_ID = RV.ALL.reduce(function (acc, a) { acc[a.id] = a; return acc; }, {});
 
 RV.defaults = function () {
