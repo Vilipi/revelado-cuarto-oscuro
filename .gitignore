@@ -1,0 +1,21 @@
+# Sistema operativo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editores
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Config local de Claude Code (la de equipo, si la hay, se sigue versionando)
+.claude/settings.local.json
+
+# Por si en algún momento se añade tooling con npm
+node_modules/
+npm-debug.log*
+
+# Temporales y logs sueltos
+*.tmp
+*.log

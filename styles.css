@@ -148,6 +148,26 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
   height: 100%;
 }
 
+/* Presets e histórico comparten la balda como dos secciones apiladas,
+   igual que Encuadre/Deformar en el carril derecho — mismo `.group`,
+   sólo que aquí el contenido es una lista larga que tiene que poder
+   crecer y desplazarse, así que la abierta reparte el alto disponible
+   con `flex: 1` en vez de quedarse en su tamaño natural. */
+.shelf__group { flex: none; min-height: 0; }
+.shelf__group[data-open="true"] {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.shelf__group[data-open="true"] > .group__body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 0;
+}
+
 .shelf__title {
   flex: none;
   margin: 0;
@@ -218,8 +238,34 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
   border-radius: 3px;
 }
 
-.btn .glyph { font-size: 12px; line-height: 1; }
-.app[data-shelf="open"] #btn-shelf { color: var(--ink); border-color: #3b3835; }
+/* Tirador de la balda: vive pegado al borde izquierdo del escenario,
+   no dentro de la propia balda, para que no lo recorte su
+   `overflow: hidden` cuando el ancho de la columna baja a 0 al
+   cerrarla — así queda alcanzable tanto abierta como cerrada. */
+.shelf-toggle {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  z-index: 9;
+  transform: translate(-50%, -50%);
+  width: 22px;
+  height: 46px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--panel-2);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  color: var(--ink-dim);
+  transition: color var(--dur), border-color var(--dur);
+}
+.shelf-toggle:hover { color: var(--ink); border-color: var(--safelight-dim); }
+.shelf-toggle .chev {
+  display: block;
+  font-size: 13px;
+  transition: transform var(--dur);
+}
+.app[data-shelf="closed"] .shelf-toggle .chev { transform: rotate(180deg); }
 
 /* ---------- Escenario ---------- */
 
@@ -233,6 +279,11 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
   min-height: 0;
   background:
     radial-gradient(ellipse at 50% 42%, #1c1a18 0%, var(--bg) 68%);
+  /* Arrastrar con cualquier pincel pasa el puntero por encima de las
+     etiquetas superpuestas (Antes/Después, Original, barras...); sin
+     esto el navegador las selecciona como si fuera texto normal. */
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 #viewport {
@@ -646,6 +697,42 @@ input.ctl__val:focus {
 }
 .warp-actions .btn { flex: 1; justify-content: center; padding: 0 8px; }
 
+/* Histórico: un paso por línea, el más reciente arriba. Vive en la
+   balda izquierda, dentro de un `.group__body` que ya reparte el alto
+   con flex — la lista sólo tiene que rellenarlo y desplazarse. */
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  margin: 0;
+  padding: 8px 10px 10px;
+  list-style: none;
+  overflow-y: auto;
+}
+.history-list::-webkit-scrollbar { width: 9px; }
+.history-list::-webkit-scrollbar-thumb { background: #2f2c29; border-radius: 9px; border: 3px solid var(--panel); }
+
+.history-item {
+  display: block;
+  width: 100%;
+  padding: 6px 9px;
+  text-align: left;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--ink-dim);
+  border: 1px solid transparent;
+  border-radius: 3px;
+  transition: color var(--dur), background var(--dur), border-color var(--dur);
+}
+.history-item:hover { color: var(--ink); background: var(--panel-2); }
+.history-item[aria-current="true"] {
+  color: var(--safelight);
+  background: #2a2118;
+  border-color: var(--safelight-dim);
+  font-weight: 500;
+}
+
 /* Aro que sigue al puntero mientras el pincel está activo */
 .brush-ring {
   position: absolute;
@@ -979,22 +1066,9 @@ input.ctl__val:focus {
 .check input { accent-color: var(--safelight); margin: 0; }
 .check:hover { color: var(--ink); }
 
-/* Con el ajuste local activo los grupos que no lo admiten se apagan:
-   un viñeteado dentro de una máscara no significa nada. */
-.group.is-off .group__body { opacity: .4; pointer-events: none; }
-.group.is-off .group__head::after {
-  content: attr(data-note);
-  margin-left: 8px;
-  font-family: var(--mono);
-  font-size: 9px;
-  letter-spacing: .16em;
-  text-transform: uppercase;
-  color: var(--ink-faint);
-}
-
 /* Mientras se edita la zona seleccionada, los sliders que sí actúan
    sobre ella se marcan para no confundir un valor local con uno global. */
-.app.is-local .group:not(.is-off) .ctl.is-dirty .ctl__val { color: var(--safelight); }
+.app.is-local .group .ctl.is-dirty .ctl__val { color: var(--safelight); }
 
 /* ---------- Barra de recorte ---------- */
 
@@ -1054,6 +1128,10 @@ input.ctl__val:focus {
   position: absolute;
   z-index: 8;
   touch-action: none;
+  /* La capa cubre toda la foto, así que si atrapara el puntero dejaría
+     el pincel inservible mientras se compara. Sólo la divisoria
+     necesita ser agarrable. */
+  pointer-events: none;
 }
 .split-overlay[hidden] { display: none; }
 
@@ -1064,6 +1142,7 @@ input.ctl__val:focus {
   width: 21px;
   margin-left: -10px;
   cursor: ew-resize;
+  pointer-events: auto;
 }
 /* La línea es un pseudoelemento: así la zona de agarre es ancha
    pero la marca visible sigue siendo de un píxel. */

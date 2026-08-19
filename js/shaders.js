@@ -42,6 +42,7 @@ precision highp float;
 varying vec2 vUV;
 
 uniform sampler2D uImage;
+uniform sampler2D uOriginal; // píxeles previos a cualquier horneado local
 uniform sampler2D uWarp;   // campo de desplazamiento del pincel (RG)
 uniform sampler2D uMask;   // máscara del ajuste local (R)
 uniform vec2  uTexel;      // 1.0 / tamaño de la imagen en píxeles
@@ -273,9 +274,11 @@ void main() {
 
   // Comparar con el original conserva el encuadre: se comparan los
   // ajustes, no el reencuadre. uSplit hace lo mismo pero sólo a la
-  // izquierda de la divisoria.
+  // izquierda de la divisoria. Se muestra uOriginal, no uImage: una
+  // zona ya horneada vive en los píxeles de uImage y no debe aparecer
+  // aquí, o "Antes" dejaría de ser el antes de verdad.
   if (uBypass > 0.5 || (uSplit >= 0.0 && vUV.x < uSplit)) {
-    gl_FragColor = vec4(texture2D(uImage, base).rgb, 1.0);
+    gl_FragColor = vec4(texture2D(uOriginal, base).rgb, 1.0);
     return;
   }
 

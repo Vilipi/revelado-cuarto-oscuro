@@ -199,17 +199,16 @@ RV.WarpField.prototype = {
 
   /* ---- Historial ---- */
 
-  snapshot: function () {
+  /** Copia el campo entero cuantizado a 16 bits, para guardar aparte. */
+  snapshotData: function () {
     var k = 32767 / RV.WARP_RANGE;
     var snap = new Int16Array(this.data.length);
     for (var i = 0; i < this.data.length; i++) snap[i] = Math.round(this.data[i] * k);
-    this.history.push(snap);
-    if (this.history.length > RV.WARP_HISTORY) this.history.shift();
+    return snap;
   },
 
-  undo: function () {
-    if (!this.history.length) return false;
-    var snap = this.history.pop();
+  /** Reemplaza el campo entero con una copia devuelta por `snapshotData`. */
+  restoreData: function (snap) {
     var k = RV.WARP_RANGE / 32767;
     var empty = true;
     for (var i = 0; i < snap.length; i++) {
@@ -218,6 +217,16 @@ RV.WarpField.prototype = {
     }
     this.empty = empty;
     this.touch({ i0: 0, i1: this.w - 1, j0: 0, j1: this.h - 1 });
+  },
+
+  snapshot: function () {
+    this.history.push(this.snapshotData());
+    if (this.history.length > RV.WARP_HISTORY) this.history.shift();
+  },
+
+  undo: function () {
+    if (!this.history.length) return false;
+    this.restoreData(this.history.pop());
     return true;
   },
 

@@ -19,8 +19,11 @@
   var presetNote = $('#preset-note');
 
   var shelf      = $('#shelf');
-  var warpGroup  = $('#group-warp');
-  var geoGroup   = $('#group-geo');
+  var warpGroup    = $('#group-warp');
+  var geoGroup     = $('#group-geo');
+  var presetsGroup = $('#shelf-presets');
+  var historyGroup = $('#shelf-history');
+  var historyList  = $('#history-list');
   var cropLayer  = $('#crop-overlay');
   var cropBox    = $('#crop-box');
   var cropbar    = $('#cropbar');
@@ -37,7 +40,11 @@
   var maskEraseBtn = $('#mask-erase');
   var maskShowBox  = $('#mask-show');
   var maskHint     = $('#mask-hint');
-  var maskApplyBtn = $('#mask-apply');
+
+  // Sesión de selección abierta: de "Pintar" a "Aplicar" y viceversa.
+  // Independiente del pincel concreto (pintar/borrar) para que alternar
+  // entre ambos sin querer no cierre la sesión a medias.
+  var maskEditing  = false;
 
   var fileInput  = $('#file-input');
   var xmpInput   = $('#xmp-input');
@@ -104,6 +111,10 @@
       var open = section.dataset.open === 'true';
       section.dataset.open = String(!open);
       head.setAttribute('aria-expanded', String(!open));
+      // Abrir otro desplegable mientras se está empujando/suavizando/
+      // restaurando suelta el pincel: si no, se queda pintando fuera de
+      // la vista de Deformar sin que se note.
+      if (brush.tool) setTool(null);
     });
 
     var body = document.createElement('div');
@@ -202,6 +213,7 @@
     amountBox.hidden = false;
     applyPresetAmount();
     setActivePreset(preset.id);
+    historyPush(img, 'Preset: ' + preset.name);
   }
 
   /**
@@ -238,6 +250,7 @@
       syncPanels();
       markEdited(img);
       requestRender();
+      historyPush(img, 'Preset quitado');
     }
     presetSel = null;
     amountBox.hidden = true;
@@ -258,6 +271,11 @@
     if (!presetSel) return;
     presetSel.amount = parseFloat(strengthInput.value);
     applyPresetAmount();
+  });
+  strengthInput.addEventListener('change', function () {
+    var img = active();
+    if (!img || !presetSel) return;
+    historyPush(img, presetSel.name + ' al ' + Math.round(presetSel.amount) + ' %');
   });
 
   /* ---- Presets propios ---- */
@@ -391,6 +409,7 @@
       var open = geoGroup.dataset.open === 'true';
       geoGroup.dataset.open = String(!open);
       head.setAttribute('aria-expanded', String(!open));
+      if (brush.tool) setTool(null);
     });
   })();
 
@@ -407,6 +426,7 @@
       RV.applyRatio(img.geo, img.bitmap.width, img.bitmap.height, r.id);
       syncGeo();
       resize();
+      historyPush(img, 'Proporción ' + r.label);
     });
     $('#ratio-seg').appendChild(b);
   });
@@ -429,10 +449,12 @@
       if (!img) { out.value = '0.0°'; return; }
       var n = parseFloat(String(out.value).replace(',', '.').replace(/[^0-9.+-]/g, ''));
       if (!isFinite(n)) { syncGeo(); return; }
+      var before = img.geo.angle;
       img.geo.angle = RV.clamp(n, -45, 45);
       RV.normalizeCrop(img.geo, img.bitmap.width, img.bitmap.height);
       syncGeo();
       resize();
+      if (img.geo.angle !== before) historyPush(img, 'Ángulo ' + img.geo.angle.toFixed(1) + '°');
     }
     out.addEventListener('focus', function () { out.select(); });
     out.addEventListener('blur', commitAngle);
@@ -451,13 +473,23 @@
       markEdited(img);
       resize();
     });
+    // Igual que en los sliders de ajuste: el paso al histórico se
+    // registra al soltar, no en cada grado que cruza el arrastre.
+    angleInput.addEventListener('change', function () {
+      var img = active();
+      if (!img || !img.history) return;
+      if (img.geo.angle !== img.history.current().geo.angle) {
+        historyPush(img, 'Ángulo ' + img.geo.angle.toFixed(1) + '°');
+      }
+    });
     angleInput.addEventListener('dblclick', function () {
       var img = active();
-      if (!img) return;
+      if (!img || img.geo.angle === 0) return;
       img.geo.angle = 0;
       RV.normalizeCrop(img.geo, img.bitmap.width, img.bitmap.height);
       syncGeo();
       resize();
+      historyPush(img, 'Ángulo restablecido');
     });
     angleInput.out = out;
     angleInput.row = row;
@@ -477,6 +509,7 @@
     RV.normalizeCrop(g, img.bitmap.width, img.bitmap.height);
     syncGeo();
     resize();
+    historyPush(img, dir > 0 ? 'Girar a la derecha' : 'Girar a la izquierda');
   }
 
   $('#rot-left').addEventListener('click', function () { rotate(-1); });
@@ -488,6 +521,7 @@
     img.geo.flipH = !img.geo.flipH;
     syncGeo();
     requestRender();
+    historyPush(img, 'Voltear horizontal');
   });
   $('#flip-v').addEventListener('click', function () {
     var img = active();
@@ -495,6 +529,7 @@
     img.geo.flipV = !img.geo.flipV;
     syncGeo();
     requestRender();
+    historyPush(img, 'Voltear vertical');
   });
 
   $('#crop-reset').addEventListener('click', function () {
@@ -504,6 +539,7 @@
     img.view = RV.defaultView();
     syncGeo();
     resize();
+    historyPush(img, 'Encuadre restablecido');
   });
 
   $('#crop-toggle').addEventListener('click', function () { setCropping(!cropping); });
@@ -528,7 +564,9 @@
     if (on) {
       if (!was) cropUndo = img ? Object.assign({}, img.geo) : null;
       setTool(null);
+      maskEditing = false;
       setMaskTool(null);
+      refreshMaskApply();
       if (split.on) setSplit(false);
       geoGroup.dataset.open = 'true';
       geoGroup.querySelector('.group__head').setAttribute('aria-expanded', 'true');
@@ -538,6 +576,11 @@
         img.geo = cropUndo;
         img.view = RV.defaultView();
         syncGeo();
+      } else if (img && cropUndo && (
+        img.geo.x !== cropUndo.x || img.geo.y !== cropUndo.y ||
+        img.geo.w !== cropUndo.w || img.geo.h !== cropUndo.h
+      )) {
+        historyPush(img, 'Recortar');
       }
       cropUndo = null;
     }
@@ -876,16 +919,16 @@
       b.setAttribute('aria-pressed', String(b.dataset.scope === scope));
     });
 
-    // Los grupos que no admiten uso local se apagan mientras se edita la
-    // zona: así se ve de un vistazo que ese slider no va a la selección.
+    // En modo zona sólo Luz, Color y Detalle tienen sentido: Encuadre y
+    // Deformar cambian la foto entera, y Efectos no admite versión local.
+    // En vez de dejarlos atenuados, se quitan del todo — no hay nada
+    // que hacer ahí mientras se pinta una selección.
     Object.keys(groupSections).forEach(function (id) {
       var off = scope === 'local' && RV.LOCAL_GROUPS.indexOf(id) === -1;
-      markGroupOff(groupSections[id], off, 'global');
+      markGroupOff(groupSections[id], off);
     });
-
-    // Deformar comparte el gesto con el pincel de selección: los dos no
-    // pueden estar en la mano a la vez, así que se aparta del todo.
-    markGroupOff(warpGroup, scope === 'local', 'no disponible');
+    markGroupOff(geoGroup, scope === 'local');
+    markGroupOff(warpGroup, scope === 'local');
     if (scope === 'local') {
       warpGroup.dataset.open = 'false';
       warpGroup.querySelector('.group__head').setAttribute('aria-expanded', 'false');
@@ -894,8 +937,8 @@
     if (scope === 'local') {
       var img = active();
       setTool(null);
-      // Entrar sin selección y sin pincel no lleva a ninguna parte.
-      if (img && (!img.local.field || img.local.field.isEmpty())) setMaskTool('paint');
+      // Entrar en modo pincel no empieza a pintar solo: hay que pulsar
+      // "Pintar" a propósito antes de que el trazo toque la foto.
       if (img) renderer.setMask(img.local.field || null);
       // Por defecto se ve la zona: es la ayuda visual que explica dónde
       // va a caer el retoque, y sin ella el modo pincel es más difícil
@@ -903,6 +946,11 @@
       maskShowBox.checked = true;
       renderer.setShowMask(true);
     } else {
+      // Salir del modo Pincel sin haber pulsado "Aplicar" no debe dejar
+      // una zona a medio pintar colgando fuera del modo que la creó: se
+      // fija sola, igual que si se hubiera pulsado el botón.
+      applyPendingZone(active());
+      maskEditing = false;
       setMaskTool(null);
       maskShowBox.checked = false;
       renderer.setShowMask(false);
@@ -913,12 +961,40 @@
     requestRender();
   }
 
-  /** Apaga un grupo y explica en la cabecera por qué no está disponible. */
-  function markGroupOff(section, off, note) {
-    section.classList.toggle('is-off', off);
-    section.querySelector('.group__head').dataset.note = off ? note : '';
-    // Atenuar y quitar los eventos de puntero no basta: sin `disabled` el
-    // control sigue alcanzándose con el tabulador y respondiendo al teclado.
+  /**
+   * Fija la zona pendiente si hay algo que fijar, o la descarta en
+   * silencio si se pintó sin tocar ningún ajuste. La usan tanto el botón
+   * "Aplicar" como el cambio de ámbito a "Toda la foto".
+   */
+  function applyPendingZone(img) {
+    if (!img) return;
+    var local = localFor(img);
+    if (local) {
+      var maskSnap = img.local.field.snapshotData();
+      if (!renderer.bakeLocal(img.id, local)) {
+        toast('No se ha podido fijar el ajuste de la zona.', true);
+        return;
+      }
+      img.baked = true;
+      img.local.settings = RV.localDefaults();
+      img.local.field.snapshot();
+      img.local.field.clear();
+      renderer.setMask(img.local.field);
+      markEdited(img);
+      toast('Zona aplicada.');
+      historyPush(img, 'Zona aplicada', { mask: maskSnap, local: cloneSettings(local) });
+    } else if (img.local.field && !img.local.field.isEmpty()) {
+      img.local.field.snapshot();
+      img.local.field.clear();
+      renderer.setMask(img.local.field);
+    }
+  }
+
+  /** Quita un grupo entero del panel mientras no tiene sentido usarlo. */
+  function markGroupOff(section, off) {
+    section.hidden = off;
+    // `hidden` ya lo saca del tabulador, pero se desactivan los controles
+    // igualmente por si algún estilo lo volviera a mostrar sin querer.
     var controls = section.querySelectorAll('.group__body button, .group__body input');
     Array.prototype.forEach.call(controls, function (el) { el.disabled = off; });
   }
@@ -953,11 +1029,31 @@
     });
   })();
 
+  /**
+   * "Pintar" abre la sesión de selección: activa el pincel y se convierte
+   * en "Aplicar". Pulsarlo de nuevo (ya como "Aplicar") fija la zona, la
+   * borra para la siguiente y cierra la sesión. Repetir el ciclo es el
+   * flujo normal para retocar varias zonas seguidas.
+   */
   maskPaintBtn.addEventListener('click', function () {
-    setMaskTool(maskBrush.tool === 'paint' ? null : 'paint');
+    if (maskEditing) {
+      applyPendingZone(active());
+      maskEditing = false;
+      setMaskTool(null);
+    } else {
+      maskEditing = true;
+      setMaskTool('paint');
+    }
+
+    syncPanels();
+    refreshMaskHint();
+    requestRender();
   });
+
+  // Borrar sólo tiene sentido dentro de una sesión abierta: alterna con
+  // pintar para corregir sin cerrar la selección en curso.
   maskEraseBtn.addEventListener('click', function () {
-    setMaskTool(maskBrush.tool === 'erase' ? null : 'erase');
+    setMaskTool(maskBrush.tool === 'erase' ? 'paint' : 'erase');
   });
 
   maskShowBox.addEventListener('change', function () {
@@ -991,44 +1087,21 @@
   });
 
   /**
-   * El botón sólo tiene sentido cuando hay zona pintada y algún ajuste
-   * que fijar. Es barato de recalcular, así que se llama en cada edición.
+   * Refleja la sesión de selección en los botones: mientras está abierta
+   * (tras pulsar "Pintar"), aparece "Borrar" y el propio botón pasa a
+   * "Aplicar"; cerrada, vuelve a "Pintar" y "Borrar" se oculta.
    */
   function refreshMaskApply() {
-    var img = active();
-    maskApplyBtn.disabled = !img || !localFor(img);
+    maskEraseBtn.hidden = !maskEditing;
+    maskPaintBtn.textContent = maskEditing ? 'Aplicar' : 'Pintar';
   }
 
-  maskApplyBtn.addEventListener('click', function () {
-    var img = active();
-    var local = img && localFor(img);
-    if (!local) return;
-
-    if (!renderer.bakeLocal(img.id, local)) {
-      toast('No se ha podido fijar el ajuste de la zona.', true);
-      return;
-    }
-
-    // El retoque ya vive en los píxeles: los sliders locales y la
-    // máscara vuelven a cero para la siguiente zona.
-    img.baked = true;
-    img.local.settings = RV.localDefaults();
-    img.local.field.snapshot();
-    img.local.field.clear();
-    renderer.setMask(img.local.field);
-    setMaskTool('paint');
-
-    syncPanels();
-    refreshMaskHint();
-    markEdited(img);
-    requestRender();
-    toast('Zona aplicada. Ya puedes pintar otra.');
-  });
 
   function afterMaskEdit(img) {
     renderer.setMask(img.local.field);
     markEdited(img);
     refreshMaskHint();
+    refreshMaskApply();
     requestRender();
   }
 
@@ -1049,6 +1122,19 @@
       head.setAttribute('aria-expanded', String(!open));
     });
   })();
+
+  // Presets e Histórico comparten la balda izquierda como dos secciones
+  // apiladas: cada una se pliega por su cuenta, y las dos pueden estar
+  // abiertas a la vez repartiéndose el alto disponible.
+  [presetsGroup, historyGroup].forEach(function (section) {
+    var head = section.querySelector('.group__head');
+    head.addEventListener('click', function () {
+      var open = section.dataset.open === 'true';
+      section.dataset.open = String(!open);
+      head.setAttribute('aria-expanded', String(!open));
+      if (brush.tool) setTool(null);
+    });
+  });
 
   var TOOLS = { push: $('#tool-push'), smooth: $('#tool-smooth'), restore: $('#tool-restore') };
 
@@ -1242,10 +1328,16 @@
     requestRender();
   }
 
+  var WARP_LABELS = { push: 'Empujar', smooth: 'Suavizar', restore: 'Restaurar' };
+
   function endStroke() {
     var img = active();
+    // El trazo de máscara no deja paso propio en el histórico: sólo
+    // cuenta cuando la zona se fija con "Aplicar".
+    var warpTool = stroke && !stroke.mask ? brush.tool : null;
     stroke = null;
     if (img && (img.warp || img.local.field)) requestRender();
+    if (img && warpTool) historyPush(img, WARP_LABELS[warpTool] || 'Deformar');
   }
 
   function warpUndo() {
@@ -1258,13 +1350,127 @@
 
   function warpClear() {
     var img = active();
-    if (!img || !img.warp) return;
+    if (!img || !img.warp || img.warp.isEmpty()) return;
     img.warp.snapshot();
     img.warp.clear();
     renderer.setWarp(null);
     markEdited(img);
     requestRender();
     toast('Deformación retirada.');
+    historyPush(img, 'Quitar deformación');
+  }
+
+  /* ---------- Histórico ---------- */
+
+  function cloneSettings(s) { return Object.assign({}, s); }
+  function cloneGeo(g) { return Object.assign({}, g); }
+
+  /** Entrada inicial de una foto recién cargada: el punto "Original". */
+  function historyInit(img) {
+    img.history = new RV.HistoryLog({
+      label: 'Original',
+      settings: cloneSettings(img.settings),
+      geo: cloneGeo(img.geo),
+      warp: null,
+      bakes: []
+    });
+  }
+
+  /**
+   * Añade un paso al histórico con el estado actual de la foto. `bake`,
+   * si se pasa, describe una zona local recién horneada — se acumula
+   * sobre las que ya había, nunca las sustituye.
+   */
+  function historyPush(img, label, bake) {
+    if (!img || !img.history) return;
+    var prev = img.history.current();
+    img.history.push({
+      label: label,
+      settings: cloneSettings(img.settings),
+      geo: cloneGeo(img.geo),
+      warp: (img.warp && !img.warp.isEmpty()) ? img.warp.snapshotData() : null,
+      bakes: bake ? prev.bakes.concat([bake]) : prev.bakes
+    });
+    renderHistoryList(img);
+  }
+
+  /**
+   * Salta a un paso ya registrado. Los ajustes y el encuadre se vuelcan
+   * directamente; la deformación se reconstruye o se vacía; y las zonas
+   * horneadas se rehacen desde el original en el mismo orden en que se
+   * aplicaron, que es lo que ya hace "Restablecer todo" para deshacerlas.
+   */
+  function historyJump(img, i) {
+    var snap = img.history.jump(i);
+    if (!snap) return;
+
+    img.settings = cloneSettings(snap.settings);
+    img.geo = cloneGeo(snap.geo);
+    img.view = RV.defaultView();
+
+    if (img.warp) {
+      if (snap.warp) img.warp.restoreData(snap.warp);
+      else img.warp.clear();
+      renderer.setWarp(img.warp.isEmpty() ? null : img.warp);
+    }
+
+    if (img.baked || snap.bakes.length) {
+      renderer.restoreSource(img.id, img.bitmap);
+      snap.bakes.forEach(function (bake) {
+        if (!img.local.field) {
+          img.local.field = new RV.MaskField(renderer.gl, img.bitmap.width, img.bitmap.height);
+        }
+        img.local.field.restoreData(bake.mask);
+        renderer.setMask(img.local.field);
+        renderer.bakeLocal(img.id, bake.local);
+      });
+      img.baked = snap.bakes.length > 0;
+    }
+
+    // El trazo de selección en curso no es parte del histórico: siempre
+    // se vuelve con la zona vacía, lista para pintar otra.
+    img.local.settings = RV.localDefaults();
+    if (img.local.field) img.local.field.clear();
+    renderer.setMask(img.local.field || null);
+    maskEditing = false;
+    setMaskTool(null);
+
+    presetSel = null;
+    amountBox.hidden = true;
+    setActivePreset(null);
+
+    syncPanels();
+    syncGeo();
+    BRUSH_SLIDERS.forEach(function (d) { if (d.refresh) d.refresh(); });
+    MASK_SLIDERS.forEach(function (d) { if (d.refresh) d.refresh(); });
+    refreshMaskHint();
+    renderHistoryList(img);
+    resize();
+    requestRender();
+  }
+
+  function renderHistoryList(img) {
+    historyList.innerHTML = '';
+    if (!img || !img.history) return;
+
+    // El más reciente arriba: es donde se está trabajando y así no hay
+    // que desplazarse para ver el último paso.
+    for (var i = img.history.entries.length - 1; i >= 0; i--) {
+      (function (i) {
+        var entry = img.history.entries[i];
+        var li = document.createElement('li');
+
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'history-item';
+        btn.textContent = entry.label;
+        if (i === img.history.index) btn.setAttribute('aria-current', 'true');
+        btn.addEventListener('click', function () { historyJump(img, i); });
+
+        li.appendChild(btn);
+        historyList.appendChild(li);
+      })(i);
+    }
   }
 
   function buildControl(adj) {
@@ -1308,10 +1514,14 @@
       var n = parseFloat(String(val.value).replace(',', '.').replace(/[^0-9.+-]/g, ''));
       var t = targetFor(img, adj);
       if (!isFinite(n)) { syncControl(adj, t[adj.id]); return; }
+      var before = t[adj.id];
       t[adj.id] = RV.clamp(n, adj.min, adj.max);
       syncControl(adj, t[adj.id]);
       markEdited(img);
-      if (t === img.settings) setActivePreset(null);
+      if (t === img.settings) {
+        setActivePreset(null);
+        if (t[adj.id] !== before) historyPush(img, adj.label + ' ' + RV.format(adj, t[adj.id]));
+      }
       requestRender();
     }
 
@@ -1342,6 +1552,18 @@
       // Un retoque local no invalida el preset: el preset es global.
       if (t === img.settings) setActivePreset(null);
       requestRender();
+    });
+
+    // El paso al histórico se registra al soltar, no en cada tick del
+    // arrastre: si no, un solo gesto llenaría la lista de decenas de
+    // entradas casi idénticas.
+    input.addEventListener('change', function () {
+      var img = active();
+      if (!img || !img.history) return;
+      var t = targetFor(img, adj);
+      if (t === img.settings && t[adj.id] !== img.history.current().settings[adj.id]) {
+        historyPush(img, adj.label + ' ' + RV.format(adj, t[adj.id]));
+      }
     });
 
     // Doble clic sobre el slider: vuelta al valor por defecto.
@@ -1388,10 +1610,13 @@
   function resetOne(adj) {
     var img = active();
     if (!img) return;
-    targetFor(img, adj)[adj.id] = adj.def;
+    var t = targetFor(img, adj);
+    if (t[adj.id] === adj.def) return;
+    t[adj.id] = adj.def;
     syncControl(adj, adj.def);
     markEdited(img);
     requestRender();
+    if (t === img.settings) historyPush(img, adj.label + ' restablecido');
   }
 
   /* ---------- Biblioteca ---------- */
@@ -1428,6 +1653,7 @@
           geo: RV.defaultGeometry(),
           view: RV.defaultView()
         };
+        historyInit(item);
         library.push(item);
         renderer.upload(item.id, bitmap);
         return item;
@@ -1492,6 +1718,8 @@
     splitLayer.hidden = true;
     $('#split-toggle').setAttribute('aria-pressed', 'false');
     setTool(null);
+    maskEditing = false;
+    setMaskTool(null);
     setCropping(false);
     syncGeo();
     syncZoombar();
@@ -1504,6 +1732,7 @@
     refreshMaskHint();
     drawHistogram(null);
     renderStrip();
+    renderHistoryList(null);
   }
 
   function select(id) {
@@ -1514,6 +1743,9 @@
     renderer.select(id);
     renderer.setWarp(img.warp && !img.warp.isEmpty() ? img.warp : null);
     renderer.setMask(img.local.field || null);
+    // Cada foto empieza su propia sesión: la de la anterior no se arrastra.
+    maskEditing = false;
+    setMaskTool(null);
     viewport.hidden = false;
     dropzone.hidden = true;
     filename.textContent = img.name + '  ·  ' + img.bitmap.width + '×' + img.bitmap.height;
@@ -1528,6 +1760,7 @@
     amountBox.hidden = true;
     setActivePreset(null);
     renderStrip();
+    renderHistoryList(img);
     resize();
   }
 
@@ -1852,17 +2085,17 @@
 
   /* ---------- Eventos ---------- */
 
-  var shelfBtn = $('#btn-shelf');
+  var shelfToggle = $('#shelf-toggle');
 
   function toggleShelf(force) {
     var open = typeof force === 'boolean' ? force : app.dataset.shelf !== 'open';
     app.dataset.shelf = open ? 'open' : 'closed';
-    shelfBtn.setAttribute('aria-expanded', String(open));
+    shelfToggle.setAttribute('aria-expanded', String(open));
     shelf.inert = !open;
     setTimeout(resize, 200);   // la columna cambia de ancho con transición
   }
-  shelfBtn.addEventListener('click', function () { toggleShelf(); });
-  toggleShelf(false);
+  shelfToggle.addEventListener('click', function () { toggleShelf(); });
+  toggleShelf(true);
 
   $('#btn-preset').addEventListener('click', function () { xmpInput.click(); });
   $('#btn-export').addEventListener('click', openExport);
@@ -1889,6 +2122,7 @@
     amountBox.hidden = true;
     setActivePreset(null);
     resize();
+    historyPush(img, 'Restablecido');
   });
 
   fileInput.addEventListener('change', function () { addFiles(fileInput.files); fileInput.value = ''; });
@@ -1971,7 +2205,9 @@
       // Dentro del recorte, Escape sólo lo cancela: cerrar de paso el
       // panel o la herramienta sería un efecto sorpresa.
       if (cropping) { setCropping(false, true); return; }
-      toggleShelf(false); setTool(null); setMaskTool(null); closeExport(); closePresetModal();
+      toggleShelf(false); setTool(null);
+      maskEditing = false; setMaskTool(null); refreshMaskApply();
+      closeExport(); closePresetModal();
     }
     if (e.key === 'Enter' && cropping) { setCropping(false); return; }
     if (e.key === '0' && !e.ctrlKey && !e.metaKey) setZoom('fit');

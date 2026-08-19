@@ -37,7 +37,7 @@ RV.Renderer = function (canvas) {
   // Cache de localizaciones de uniforms.
   this.u = {};
   var self = this;
-  var fixed = ['uImage', 'uWarp', 'uMask', 'uTexel', 'uAspect', 'uBypass',
+  var fixed = ['uImage', 'uOriginal', 'uWarp', 'uMask', 'uTexel', 'uAspect', 'uBypass',
                'uWarpOn', 'uWarpRange', 'uMaskOn', 'uMaskShow', 'uFlipY',
                'uView', 'uCrop', 'uOriented', 'uAngle', 'uQuarter', 'uFlip', 'uSplit']
     .concat(RV.GLOBAL_ONLY.map(function (a) { return a.uniform; }));
@@ -71,6 +71,7 @@ RV.Renderer = function (canvas) {
   gl.uniform1i(this.u.uImage, 0);
   gl.uniform1i(this.u.uWarp, 1);
   gl.uniform1i(this.u.uMask, 2);
+  gl.uniform1i(this.u.uOriginal, 3);
   gl.uniform1f(this.u.uWarpRange, RV.WARP_RANGE);
 
   // Campo neutro para cuando la imagen no está deformada: evita
@@ -200,7 +201,13 @@ RV.Renderer.prototype = {
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 
     gl.deleteFramebuffer(target.fbo);
-    gl.deleteTexture(entry.tex);
+    // La primera vez que se hornea algo, la textura de ahora mismo es
+    // todavía el original intacto: se guarda aparte en vez de borrarla,
+    // para que "Antes" y la comparación con la divisoria puedan seguir
+    // mostrando la foto sin ninguna zona fijada, aunque ya se haya
+    // horneado una o varias. Horneados siguientes no la tocan.
+    if (entry.origTex) gl.deleteTexture(entry.tex);
+    else entry.origTex = entry.tex;
     entry.tex = target.tex;
     gl.bindTexture(gl.TEXTURE_2D, entry.tex);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
@@ -219,6 +226,9 @@ RV.Renderer.prototype = {
     var entry = this.textures[id];
     if (!entry) return;
     this.gl.deleteTexture(entry.tex);
+    // Vuelve a estar todo en un único original: no hace falta conservar
+    // aparte lo que ya no diverge de él.
+    if (entry.origTex) this.gl.deleteTexture(entry.origTex);
     delete this.textures[id];
     var fresh = this.upload(id, source);
     if (this.current === entry) this.current = fresh;
@@ -227,6 +237,7 @@ RV.Renderer.prototype = {
   release: function (id) {
     var entry = this.textures[id];
     if (!entry) return;
+    if (entry.origTex) this.gl.deleteTexture(entry.origTex);
     this.gl.deleteTexture(entry.tex);
     delete this.textures[id];
   },
@@ -370,6 +381,10 @@ RV.Renderer.prototype = {
     gl.activeTexture(gl.TEXTURE2);
     if (this.mask) this.mask.upload();
     gl.bindTexture(gl.TEXTURE_2D, this.mask ? this.mask.tex : this.blankMask);
+    gl.activeTexture(gl.TEXTURE3);
+    // Antes del primer horneado no hay divergencia: el original es el
+    // mismo que el actual.
+    gl.bindTexture(gl.TEXTURE_2D, this.current.origTex || this.current.tex);
     gl.activeTexture(gl.TEXTURE0);
   },
 

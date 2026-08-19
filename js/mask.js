@@ -186,16 +186,15 @@ RV.MaskField.prototype = {
 
   /* ---- Historial ---- */
 
-  snapshot: function () {
+  /** Copia la rejilla entera cuantizada a 8 bits, para guardar aparte. */
+  snapshotData: function () {
     var snap = new Uint8Array(this.data.length);
     for (var i = 0; i < this.data.length; i++) snap[i] = Math.round(this.data[i] * 255);
-    this.history.push(snap);
-    if (this.history.length > RV.MASK_HISTORY) this.history.shift();
+    return snap;
   },
 
-  undo: function () {
-    if (!this.history.length) return false;
-    var snap = this.history.pop();
+  /** Reemplaza la rejilla entera con una copia devuelta por `snapshotData`. */
+  restoreData: function (snap) {
     var empty = true;
     for (var i = 0; i < snap.length; i++) {
       this.data[i] = snap[i] / 255;
@@ -203,6 +202,16 @@ RV.MaskField.prototype = {
     }
     this.empty = empty;
     this.touch({ i0: 0, i1: this.w - 1, j0: 0, j1: this.h - 1 });
+  },
+
+  snapshot: function () {
+    this.history.push(this.snapshotData());
+    if (this.history.length > RV.MASK_HISTORY) this.history.shift();
+  },
+
+  undo: function () {
+    if (!this.history.length) return false;
+    this.restoreData(this.history.pop());
     return true;
   },
 

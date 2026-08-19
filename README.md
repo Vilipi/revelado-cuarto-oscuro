@@ -1,7 +1,8 @@
 # Revelado
 
 Editor fotográfico web al estilo Lightroom. Render en WebGL, importación de
-presets `.xmp` de Camera Raw y exportación a JPG a resolución nativa.
+presets `.xmp` de Camera Raw, exportación a JPG a resolución nativa, y
+retoque local con pincel de selección.
 
 ## Cómo ejecutarlo
 
@@ -17,13 +18,14 @@ Si prefieres servidor: `npx serve .`
 ```
 revelado/
 ├─ index.html            Marcado: barra, balda de presets, escenario, panel, tira
-├─ css/
-│  └─ styles.css         Tokens de color/tipografía + rejilla + sliders
+├─ styles.css            Tokens de color/tipografía + rejilla + sliders
 ├─ js/
-│  ├─ adjustments.js     Catálogo de ajustes + presets incluidos
-│  ├─ shaders.js         GLSL: vértice + fragmento con todo el revelado
+│  ├─ adjustments.js     Catálogo de ajustes globales y locales + presets
+│  ├─ shaders.js         GLSL: vértice + fragmento con pipeline de revelado
 │  ├─ geometry.js        Recorte, ángulo, giros, volteos y encuadre de zoom
 │  ├─ liquify.js         Campo de deformación del pincel (rejilla + historial)
+│  ├─ mask.js            Máscara de selección para ajustes locales (rejilla)
+│  ├─ history.js         Histórico de ediciones: pasos y salto entre ellos
 │  ├─ renderer.js        Contexto WebGL, texturas, histograma, exportación
 │  ├─ xmp.js             Parser de .xmp y mapeo crs:* → sliders
 │  └─ app.js             Interfaz, biblioteca, eventos, bucle de render
@@ -31,14 +33,50 @@ revelado/
    └─ Tarde-calida.xmp   Preset de ejemplo para probar el importador
 ```
 
-`adjustments.js` es la única fuente de verdad. Añadir un control nuevo son
-tres pasos: una entrada en `RV.GROUPS`, un `uniform` en el fragment shader con
-ese mismo nombre, y (si aplica) una fila en `RV.XMP_MAP`. La interfaz y el
-mapeo de uniforms se generan solos.
+`adjustments.js` es la única fuente de verdad de los ajustes. Añadir un control
+nuevo son tres pasos: una entrada en `RV.GROUPS`, un `uniform` en el fragment
+shader con ese mismo nombre, y (si aplica) una fila en `RV.XMP_MAP`. La
+interfaz y el mapeo de uniforms se generan solos.
+
+## Ajustes globales y locales
+
+Los ajustes se dividen en dos categorías:
+
+### Globales (toda la foto)
+
+Luz, Color, Detalle, Encuadre y Deformar aplican a la imagen completa. Se
+puede acceder a ellos por el botón «Toda la foto» del selector de alcance.
+
+### Locales (zona con pincel)
+
+Luz, Color y Detalle también disponibles por zona: selecciona el botón «Pincel»
+en el selector de alcance y pinta la zona sobre la que quieres aplicar
+ajustes locales.
+
+**Flujo de trabajo:**
+
+1. Cambia a modo «Pincel»
+2. Pinta la zona con el pincel (ajusta el tamaño con el slider)
+3. La zona se ve teñida en rojo (desactiva «Ver la zona seleccionada» para
+   ocultarla)
+4. Ajusta Luz, Color y Detalle: solo afectan la zona pintada
+5. Cuando estés satisfecho, haz clic en «Aplicar» para fijar la zona
+6. La máscara se borra y puedes pintar otra zona, sin perder los retoques
+   anteriores
+
+El retoque local suma aditivamente con los ajustes globales, limitado a los
+rangos de cada slider para evitar saturación.
+
+**Salir sin pulsar «Aplicar».** Cambiar a «Toda la foto» con una zona
+pintada todavía pendiente la fija sola, exactamente como si se hubiera
+pulsado el botón — no hay forma de dejarla a medias colgando fuera del modo
+que la creó. Si se pintó una zona pero no se tocó ningún ajuste, se
+descarta en silencio en vez de fijar un horneado sin ningún efecto detrás.
 
 ## Pipeline de imagen
 
-Una sola pasada de fragmento, sin render targets intermedios:
+Una sola pasada de fragmento, sin render targets intermedios (excepto durante
+el baking de zonas locales):
 
 1. **Detalle** — máscara de enfoque sobre la luminancia a tres radios
    (enfoque ≈1 px, textura ≈2,5 px, claridad ≈9 px con máscara de medios tonos).
@@ -47,13 +85,43 @@ Una sola pasada de fragmento, sin render targets intermedios:
 4. **Luz** — exposición como `exp2(pasos)`; sombras y negros suman luz,
    iluminaciones y blancos multiplican. Es deliberado: multiplicar un negro
    puro no lo levanta nunca.
-5. **Volver a sRGB** — y ahí el contraste (curva en S) y el color
+5. **Ajustes locales** — si hay máscara activa, suma los ajustes locales a los
+   globales en cada píxel (solo luz, color y detalle).
+6. **Volver a sRGB** — y ahí el contraste (curva en S) y el color
    (intensidad protegiendo lo ya saturado, luego saturación global).
+7. **Viñeteado y grano** — efectos finales que se aplican una sola vez después
+   de mezclar.
 
-El radio de los desenfoques se expresa en texels de la **imagen original**, no
-del lienzo, para que la vista previa y el JPG exportado coincidan. Como
-contrapartida, el enfoque en vista ajustada se aprecia poco: hay que juzgarlo
-sobre el archivo exportado, igual que en Lightroom fuera del 1:1.
+Al aceptar una zona local («Aplicar»), se dibuja el resultado de los ajustes
+sobre un framebuffer con la máscara, se reorienta según la deformación
+acumulada, y se reescribe la textura de la imagen. Los píxeles enmascarados
+quedan con el retoque fijo; los no enmascarados vuelven al original.
+
+## Máscara de selección local
+
+Vive en `mask.js` como `Float32Array` en una rejilla de 768 px de lado mayor
+(escala adaptada al aspecto de la imagen), con precisión de un trazo suave:
+cada celda guarda 0..1 cuánto se aplica ahí el ajuste local. Se sube a GPU
+cuantizada a 8 bits con `upload()`.
+
+**No recorre la rejilla entera por trazo.** Cada pincelada toca solo su
+rectángulo, y `texSubImage2D` sube ese rectángulo solamente: un trazo pequeño
+mueve unos pocos KB en lugar de la textura completa. El radio del pincel se
+expresa en píxeles de imagen para que salga redondo aunque la foto no sea
+cuadrada.
+
+Cuatro herramientas de pincel:
+
+- **Pintar**: suma zona a la selección; insistir suavemente satura en lugar de
+  desbordar.
+- **Borrar**: resta zona de la selección.
+- **Todo**: selecciona la imagen entera (punto de partida para ir restando).
+- **Invertir**: invierte la selección.
+
+Cada trazo hace `snapshot()` antes de empezar: `Ctrl+Z` deshace hasta 12.
+
+Cuando haces clic en «Pintar», el botón cambia a «Aplicar» y aparece el botón
+«Borrar» al lado. Esto te recuerda que tienes zona pintada y lista para fijar.
 
 ## Encuadre y zoom
 
@@ -132,6 +200,11 @@ deformar, de forma gradual. El radio se mide en píxeles
 de imagen, no de pantalla, así que el pincel es redondo aunque la foto no sea
 cuadrada, y el trazo sale igual en la vista previa que en el archivo exportado.
 
+Nota: Deformar y el pincel de selección no pueden usarse a la vez — es el mismo
+gesto sobre la foto. Al cambiar a modo «Pincel», el grupo Deformar desaparece
+del panel entero, junto con Encuadre y Efectos: ninguno de los tres admite
+ajuste local, así que no hay nada que hacer ahí mientras se pinta una zona.
+
 Cada trazo hace `snapshot()` antes de empezar: `Ctrl+Z` deshace hasta 12. Las
 copias se guardan como `Int16Array` — 9 MB de historial por foto en vez de 30, y
 el error al deshacer queda en 0,003 px, muy por debajo de lo visible.
@@ -168,13 +241,16 @@ lista de valores y no como un formulario. El ángulo del recorte funciona igual.
 - El grano se genera a partir de `gl_FragCoord`, así que su tamaño va en
   píxeles de pantalla: en el JPG exportado se ve más fino que en la vista
   previa. Es la única parte del pipeline que no es resolución-independiente.
+- Las máscaras de selección local usan texturas 8-bit: cada trazo sube solo el
+  rectángulo del pincel, no el campo entero.
 
 ## Presets
 
-La balda izquierda (interruptor «Presets» en la barra, `Esc` para cerrarla)
-lista seis presets incluidos definidos en `RV.PRESETS`, dentro de
-`adjustments.js`. Cada uno es un objeto parcial: lo que no menciona vuelve a su
-valor por defecto al aplicarse, igual que en Lightroom.
+La balda izquierda (abierta por defecto; el tirador pegado al borde de la
+foto la abre y la cierra, `Esc` también la cierra) lista seis presets
+incluidos definidos en `RV.PRESETS`, dentro de `adjustments.js`. Cada uno es
+un objeto parcial: lo que no menciona vuelve a su valor por defecto al
+aplicarse, igual que en Lightroom.
 
 **Intensidad y quitar.** Al aplicar un preset se guarda el estado previo en
 `presetSel.before`. Con eso, el slider de intensidad mezcla entre ese estado y
@@ -198,6 +274,37 @@ navegador si no, y sólo la sesión en último caso. Guardar nunca debe romper l
 aplicación, así que todo va envuelto.
 
 En estrecho (<940 px) la balda se superpone en lugar de empujar el escenario.
+
+## Histórico
+
+Panel «Histórico» en la balda izquierda, debajo de Presets — las dos
+secciones se pliegan por separado y, si se abren a la vez, se reparten el
+alto disponible en vez de superponerse. Es la que se ve por defecto al
+arrancar (Presets empieza plegado). Al estilo del panel de historial de
+Lightroom: cada paso de edición queda como una línea con su etiqueta
+(«Exposición +0,50», «Recortar», «Preset: Tarde cálida», «Zona aplicada»…), el
+más reciente arriba, y pulsar cualquiera de ellas vuelve la foto exactamente a
+ese punto — sliders, encuadre, deformación y zonas locales horneadas incluidos.
+Si desde un paso antiguo se hace un cambio nuevo, lo que había después se
+descarta, igual que el «rehacer» de cualquier editor.
+
+Vive en `history.js` como `RV.HistoryLog`, una por foto. Cada paso es una
+fotografía completa del estado, no una diferencia respecto al anterior:
+saltar a cualquier punto es aplicar ese estado directamente, sin reproducir
+los pasos intermedios. Lo único que se guarda por delta son las zonas locales
+horneadas — una copia de la foto entera en cada paso sería demasiado caro —,
+así que cada entrada guarda la lista de zonas aplicadas hasta ese momento
+(máscara cuantizada a 8 bits + ajustes) y volver atrás las rehace desde el
+original en el mismo orden, el mismo camino que ya usa «Restablecer todo»
+para deshacerlas.
+
+Qué genera un paso: soltar un slider global (no cada tick del arrastre, sólo
+al soltar), aplicar o quitar un preset y mover su intensidad, cualquier cambio
+de encuadre (recorte, ángulo, proporción, giro, volteo), una zona de pincel
+aplicada, un trazo de deformación, y «Restablecer todo». Lo que queda fuera a
+propósito: el trazo en curso del pincel de selección —sólo cuenta al pulsar
+«Aplicar»— y el deshacer contextual con `Ctrl+Z` de deformación y máscara, que
+conserva su propio historial corto de siempre y no interactúa con éste.
 
 ## Biblioteca
 
@@ -228,8 +335,10 @@ los paneles, para que nadie crea que está viendo el preset completo.
   es mover a utilidades el layout y la barra, y dejar `.ctl` como componente en
   una capa `@layer components`.
 - **Orden de carga**: `adjustments` → `shaders` → `geometry` → `liquify` →
-  `renderer` → `xmp` → `app`. `renderer.js` usa `RV.oriented` y
-  `RV.outputSize`, así que `geometry.js` tiene que ir antes.
+  `mask` → `history` → `renderer` → `xmp` → `app`. `renderer.js` usa
+  `RV.oriented` y `RV.outputSize`, así que `geometry.js` tiene que ir antes.
+  `mask.js` crea la clase `RV.MaskField` que usa `renderer.js`. `history.js`
+  no depende de ningún otro módulo, sólo lo usa `app.js`.
 - **Vite / ESM**: cambia los `window.RV` por `export`/`import` y añade
   `type="module"` en `index.html`. Los ficheros ya están separados por
   responsabilidad, no hay dependencias cruzadas más allá de `adjustments.js`.
@@ -243,3 +352,6 @@ los paneles, para que nadie crea que está viendo el preset completo.
   el fragmento.
 - Copiar y pegar ajustes entre fotos de la biblioteca: el estado ya vive por
   imagen en `item.settings`, es solo interfaz.
+- Nombrar los pasos del histórico a mano, y marcar uno como «instantánea» para
+  no perderlo cuando el límite de `RV.HISTORY_MAX` empiece a descartar los
+  más antiguos.

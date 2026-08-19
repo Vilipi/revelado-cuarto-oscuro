@@ -11,52 +11,70 @@
 </head>
 <body>
 
-<div class="app" id="app" data-shelf="closed">
+<div class="app" id="app" data-shelf="open">
 
   <header class="bar">
     <div class="brand"><b>Revelado</b><span>Cuarto oscuro</span></div>
-
-    <button class="btn" id="btn-shelf" type="button" aria-expanded="false" aria-controls="shelf">
-      <span class="glyph" aria-hidden="true">☰</span> Presets
-    </button>
 
     <div class="spacer"></div>
     <div class="filename" id="filename"></div>
     <button class="btn btn--key" id="btn-export" type="button">Exportar…</button>
   </header>
 
-  <aside class="shelf" id="shelf" aria-label="Presets">
+  <aside class="shelf" id="shelf" aria-label="Presets e histórico">
     <div class="shelf__inner">
-      <div class="shelf__scroll">
-        <h2 class="shelf__title">Incluidos</h2>
-        <ul class="preset-list" id="preset-list"></ul>
 
-        <h2 class="shelf__title" id="mine-title" hidden>Míos</h2>
-        <ul class="preset-list" id="user-preset-list"></ul>
-      </div>
+      <section class="group shelf__group" data-open="false" id="shelf-presets">
+        <button class="group__head" type="button" aria-expanded="false" aria-controls="shelf-presets-body">
+          Presets <span class="chev" aria-hidden="true">▾</span>
+        </button>
+        <div class="group__body" id="shelf-presets-body">
+          <div class="shelf__scroll">
+            <h2 class="shelf__title">Incluidos</h2>
+            <ul class="preset-list" id="preset-list"></ul>
 
-      <div class="shelf__amount" id="preset-amount" hidden>
-        <div class="ctl is-dirty">
-          <div class="ctl__top">
-            <label class="ctl__label" for="preset-strength">Intensidad</label>
-            <span class="ctl__val" id="preset-strength-val">100 %</span>
+            <h2 class="shelf__title" id="mine-title" hidden>Míos</h2>
+            <ul class="preset-list" id="user-preset-list"></ul>
           </div>
-          <div class="ctl__track">
-            <input type="range" id="preset-strength" min="0" max="100" step="1" value="100">
+
+          <div class="shelf__amount" id="preset-amount" hidden>
+            <div class="ctl is-dirty">
+              <div class="ctl__top">
+                <label class="ctl__label" for="preset-strength">Intensidad</label>
+                <span class="ctl__val" id="preset-strength-val">100 %</span>
+              </div>
+              <div class="ctl__track">
+                <input type="range" id="preset-strength" min="0" max="100" step="1" value="100">
+              </div>
+            </div>
+            <p class="shelf__hint">Vuelve a pulsar el preset activo para quitarlo.</p>
+          </div>
+
+          <div class="shelf__foot">
+            <button class="btn" id="btn-preset-save" type="button">Guardar preset</button>
+            <button class="btn" id="btn-preset" type="button">Importar .xmp</button>
+            <p class="shelf__hint">También puedes soltar archivos <kbd>.xmp</kbd> sobre la ventana.</p>
           </div>
         </div>
-        <p class="shelf__hint">Vuelve a pulsar el preset activo para quitarlo.</p>
-      </div>
+      </section>
 
-      <div class="shelf__foot">
-        <button class="btn" id="btn-preset-save" type="button">Guardar preset</button>
-        <button class="btn" id="btn-preset" type="button">Importar .xmp</button>
-        <p class="shelf__hint">También puedes soltar archivos <kbd>.xmp</kbd> sobre la ventana.</p>
-      </div>
+      <section class="group shelf__group" data-open="true" id="shelf-history">
+        <button class="group__head" type="button" aria-expanded="true" aria-controls="shelf-history-body">
+          Histórico <span class="chev" aria-hidden="true">▾</span>
+        </button>
+        <div class="group__body" id="shelf-history-body">
+          <ul class="history-list" id="history-list"></ul>
+        </div>
+      </section>
+
     </div>
   </aside>
 
   <main class="stage" id="stage">
+    <button class="shelf-toggle" id="shelf-toggle" type="button" aria-expanded="true" aria-controls="shelf">
+      <span class="chev" aria-hidden="true">‹</span>
+    </button>
+
     <canvas id="viewport" hidden></canvas>
     <div class="dropzone" id="dropzone">
       <strong>Suelta aquí tus fotos</strong>
@@ -128,7 +146,7 @@
         <div class="scope__body" id="scope-body">
           <div class="tools tools--two">
             <button class="tool" id="mask-paint" type="button" aria-pressed="false">Pintar</button>
-            <button class="tool" id="mask-erase" type="button" aria-pressed="false">Borrar</button>
+            <button class="tool" id="mask-erase" type="button" aria-pressed="false" hidden>Borrar</button>
           </div>
 
           <div id="mask-sliders"></div>
@@ -145,10 +163,6 @@
           </div>
 
           <p class="tool-hint" id="mask-hint"></p>
-
-          <button class="btn btn--key mask-apply" id="mask-apply" type="button" disabled>
-            Aceptar y pintar otra zona
-          </button>
         </div>
       </div>
 
@@ -269,6 +283,7 @@
 <script src="js/geometry.js"></script>
 <script src="js/liquify.js"></script>
 <script src="js/mask.js"></script>
+<script src="js/history.js"></script>
 <script src="js/renderer.js"></script>
 <script src="js/xmp.js"></script>
 <script src="js/app.js"></script>
