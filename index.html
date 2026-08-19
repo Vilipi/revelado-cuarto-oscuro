@@ -12,6 +12,12 @@
 <body>
 
 <div class="app" id="app" data-shelf="open">
+  <script>
+    // Se corrige aquí mismo, antes de que nada se pinte: si se hiciera
+    // en app.js (al final del documento) la balda abierta del atributo
+    // de arriba llegaría a verse un instante en móvil antes de cerrarse.
+    if (window.innerWidth <= 940) document.getElementById('app').dataset.shelf = 'closed';
+  </script>
 
   <header class="bar">
     <div class="brand"><b>Revelado</b><span>Cuarto oscuro</span></div>
@@ -30,7 +36,6 @@
         </button>
         <div class="group__body" id="shelf-presets-body">
           <div class="shelf__scroll">
-            <h2 class="shelf__title">Incluidos</h2>
             <ul class="preset-list" id="preset-list"></ul>
 
             <h2 class="shelf__title" id="mine-title" hidden>Míos</h2>
@@ -69,6 +74,8 @@
 
     </div>
   </aside>
+
+  <div class="shelf-backdrop" id="shelf-backdrop"></div>
 
   <main class="stage" id="stage">
     <button class="shelf-toggle" id="shelf-toggle" type="button" aria-expanded="true" aria-controls="shelf">

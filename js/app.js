@@ -2085,7 +2085,8 @@
 
   /* ---------- Eventos ---------- */
 
-  var shelfToggle = $('#shelf-toggle');
+  var shelfToggle   = $('#shelf-toggle');
+  var shelfBackdrop = $('#shelf-backdrop');
 
   function toggleShelf(force) {
     var open = typeof force === 'boolean' ? force : app.dataset.shelf !== 'open';
@@ -2095,7 +2096,11 @@
     setTimeout(resize, 200);   // la columna cambia de ancho con transición
   }
   shelfToggle.addEventListener('click', function () { toggleShelf(); });
-  toggleShelf(true);
+  // En móvil la balda se superpone (mismo corte de 940px que styles.css) en
+  // vez de empujar el escenario, así que abrirla de entrada taparía casi
+  // toda la pantalla nada más cargar. En escritorio sí hay sitio de sobra.
+  shelfBackdrop.addEventListener('click', function () { toggleShelf(false); });
+  toggleShelf(window.innerWidth > 940);
 
   $('#btn-preset').addEventListener('click', function () { xmpInput.click(); });
   $('#btn-export').addEventListener('click', openExport);

@@ -267,6 +267,11 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 }
 .app[data-shelf="closed"] .shelf-toggle .chev { transform: rotate(180deg); }
 
+/* Sólo hace falta velo cuando la balda flota encima del escenario en vez
+   de empujarlo — es decir, sólo en la adaptación a pantallas estrechas
+   de más abajo, que es donde se reactiva. */
+.shelf-backdrop { display: none; }
+
 /* ---------- Escenario ---------- */
 
 .stage {
@@ -640,6 +645,10 @@ input.ctl__val:focus {
   }
   .rail { border-left: none; border-top: 1px solid var(--rule); }
   .filename { display: none; }
+  /* El carril ya se queda con poco alto en móvil (300px fijos); el
+     histograma es lo menos imprescindible de lo que hay ahí, así que
+     es lo primero que se quita para dejarle sitio a los ajustes. */
+  .histogram { display: none; }
 
   /* En estrecho el panel de presets se superpone en lugar de empujar. */
   .shelf {
@@ -652,6 +661,47 @@ input.ctl__val:focus {
     transition: transform 180ms ease;
   }
   .app[data-shelf="open"] .shelf { transform: none; border-right-color: var(--rule); }
+  /* En pantallas muy estrechas un ancho fijo de 238px puede ser casi toda
+     la pantalla; se limita a una fracción del viewport en vez de un valor
+     absoluto. */
+  .shelf__inner { width: min(var(--shelf), 84vw); }
+
+  /* Velo que cierra la balda al tocar fuera: en escritorio el tirador
+     siempre queda a la vista porque empuja el escenario, pero aquí la
+     balda flota encima de todo y lo tapa — sin este velo no habría forma
+     de cerrarla con el dedo. */
+  .shelf-backdrop {
+    display: block;
+    position: fixed;
+    top: 46px; right: 0; bottom: 0; left: 0;
+    z-index: 14;
+    background: rgba(8, 7, 7, .55);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 180ms ease;
+  }
+  .app[data-shelf="open"] .shelf-backdrop { opacity: 1; pointer-events: auto; }
+
+  /* El tirador queda tapado por la balda abierta si no sube por encima:
+     al no poder arrastrar el borde del escenario como en escritorio (la
+     balda flota, no empuja), sigue siendo el sitio más natural donde
+     buscarlo para cerrarla, además del velo. */
+  .shelf-toggle { z-index: 16; }
+
+  /* Menos aire alrededor de la foto: en un móvil esos 30px de cada lado
+     son proporcionalmente mucho más caros que en escritorio. */
+  .stage { padding: 14px; }
+
+  /* Sin tope de ancho el rejilla del `.dropzone` (`justify-items: center`)
+     mide cada fila por su contenido, así que la frase larga se sale del
+     recuadro en vez de bajar de línea. En escritorio nunca hace falta
+     porque siempre sobra sitio para que quepa entera. */
+  .dropzone span { max-width: 280px; }
+
+  /* Sin ratón no hay `:hover` que revele la × de quitar una miniatura:
+     sin esto sería inalcanzable con el dedo. La de los presets propios
+     va más abajo, junto a la regla de la que depende en cascada. */
+  .thumb__del { opacity: 1; width: 22px; height: 22px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -1251,3 +1301,28 @@ input.ctl__val:focus {
 
 .seg--three { grid-template-columns: repeat(3, 1fr); margin-bottom: 8px; }
 #quality-field > span { margin-bottom: 6px; }
+
+/* ---------- Objetivos táctiles en pantallas estrechas ----------
+   Va aparte de la adaptación de la rejilla, de más arriba en el
+   archivo: estos selectores (.tool, .crop-handle, .zoombar__btn...) se
+   definen más abajo que aquella, y en CSS la regla que aparece después
+   en el archivo gana a igual especificidad — declarada allí, esta
+   habría perdido la pugna contra su propia base. */
+@media (max-width: 940px) {
+  /* Sin ratón no hay `:hover` que revele la × de borrar un preset
+     propio: sin esto sería inalcanzable con el dedo. */
+  .preset-actions { opacity: 1; }
+
+  /* Un poco más de aire para el dedo en los controles con más uso. */
+  .tool { padding: 10px 4px; }
+  .crop-handle { width: 22px; height: 22px; }
+  .crop-handle[data-handle="nw"] { top: -11px; left: -11px; }
+  .crop-handle[data-handle="ne"] { top: -11px; right: -11px; }
+  .crop-handle[data-handle="sw"] { bottom: -11px; left: -11px; }
+  .crop-handle[data-handle="se"] { bottom: -11px; right: -11px; }
+  .crop-handle[data-handle="n"]  { top: -11px; margin-left: -11px; }
+  .crop-handle[data-handle="s"]  { bottom: -11px; margin-left: -11px; }
+  .crop-handle[data-handle="w"]  { left: -11px; margin-top: -11px; }
+  .crop-handle[data-handle="e"]  { right: -11px; margin-top: -11px; }
+  .zoombar__btn, .zoombar__pct, .viewbar__btn { height: 32px; }
+}

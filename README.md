@@ -273,7 +273,19 @@ La persistencia usa la API de almacenamiento de artefactos si existe, el
 navegador si no, y sólo la sesión en último caso. Guardar nunca debe romper la
 aplicación, así que todo va envuelto.
 
-En estrecho (<940 px) la balda se superpone en lugar de empujar el escenario.
+En estrecho (≤940 px, el mismo corte que usa toda la adaptación a móvil) la
+balda se superpone en lugar de empujar el escenario, empieza cerrada en vez
+de abierta, y un velo detrás la cierra al tocar fuera — el tirador que la
+abre/cierra en escritorio queda tapado por la propia balda al estar abierta,
+así que hace falta otra forma de cerrarla con el dedo. Ese estado inicial se
+decide dos veces: un script en línea nada más abrir `<div id="app">` lo
+corrige antes de que el navegador pinte nada (si no, se vería la balda
+abierta un instante en móvil antes de cerrarse), y `app.js` lo repite al
+final para dejar también `aria-expanded` e `inert` en su sitio.
+
+El histograma también se oculta ahí: en móvil el carril derecho ya se queda
+con poco alto (300px fijos, repartidos entre el selector de ámbito y los
+grupos de ajuste), y es lo menos imprescindible de lo que hay dentro.
 
 ## Histórico
 
